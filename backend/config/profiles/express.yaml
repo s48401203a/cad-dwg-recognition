@@ -1,0 +1,20 @@
+id: "express"
+display_name: "快运场地"
+site_type: "express"
+description: "月台、车尾摄像头、射灯、AP、鱼眼、半球和机柜的通用解析规则集合。"
+standards_overrides:
+  site:
+    site_type: "express"
+  dock:
+    camera_to_vehicle_tail_gap_m: 5.0
+rule_overrides: {}
+active_modules:
+  - "warehouse.shell"
+  - "parking.tail_dock"
+  - "device.ap"
+  - "device.fisheye"
+  - "device.dome"
+  - "device.bullet"
+  - "device.rear_camera"
+  - "device.cabinet"
+  - "cables.native"

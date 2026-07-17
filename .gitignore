@@ -1,0 +1,89 @@
+# Local runtime state
+.cad-server.json
+.codex-tmp/
+.claude/
+codex/
+.codegraph/
+.runtime-macos/
+.venv-macos/
+
+# Uploaded drawings, parsed project metadata, logs, and backups
+backend/uploads/
+backend/projects/
+backend/logs/
+backups/
+projects/
+backend/projects-archive/
+
+# Generated CAD / semantic outputs
+*.dwg
+*.dxf
+**/semantic.json
+**/*.semantic.json
+output/replay/
+
+# Customer data, generated exports, and internal project workspaces
+exports/
+反推项目/
+截图相关说明/
+ProjectTodo.md
+claudecodextodo.md
+AGENTS.md
+ENVIRONMENT_SETUP.md
+
+# Keep only the explicitly sanitized documentation asset in this repository
+docs/*
+!docs/assets/
+!docs/assets/demo-sanitized.png
+
+# Customer-specific rules, baselines, and internal automation are retained locally
+backend/config/layer_render_standards.yaml
+backend/config/profiles/baishi-*.yaml
+orchestrator/
+skills/
+tests/
+tools/
+启动反推隔离验证.command
+停止反推隔离验证.command
+启动项目.command
+停止项目.command
+start-project.command
+stop-project.command
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+wheelhouse/
+
+# Node / frontend build outputs
+node_modules/
+dist/
+build/
+
+# Logs and local env
+*.log
+.env
+.env.*
+!.env.example
+
+# Local project notes that contain real project names and machine paths
+PROGRESS.md
+操作手册.md
+启动说明.md
+
+# Screenshots and images: keep only the sanitized demo image
+*.png
+*.jpg
+*.jpeg
+*.gif
+!docs/
+!docs/assets/
+!docs/assets/demo-sanitized.png
+
+# OS / editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

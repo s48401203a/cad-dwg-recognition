@@ -1,0 +1,13 @@
+id: "supply_chain"
+display_name: "仓储供应链场地"
+site_type: "supply_chain"
+description: "仓储场地 profile 框架，支持货架、工位、分拣和 DWS 等模块的渐进扩展。"
+standards_overrides:
+  site:
+    site_type: "supply_chain"
+rule_overrides: {}
+future_modules:
+  - "storage.rack"
+  - "operation.workstation"
+  - "sorting.sorter"
+  - "dimensioning.dws"

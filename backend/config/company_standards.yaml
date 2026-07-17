@@ -1,0 +1,59 @@
+version: "1.0"
+
+site:
+  dock_height_m: 1.2
+  warehouse_floor_height_m: 1.2
+  yard_ground_elevation_m: 0.0
+  warehouse_wall_height_m: 10.5
+  warehouse_roof_peak_height_m: 12.6
+
+dock:
+  camera_to_vehicle_tail_gap_m: 5.0
+  camera_to_wall_reference_m: 5.5
+  vehicle_wall_clearance_m: 0.6
+
+vehicles:
+  semi_trailer_17_5:
+    label: "17.5M 集卡挂车"
+    standard_only: true
+    length_m: 17.5
+    width_m: 2.5
+    height_m: 4.1
+    color: "#d8b46f"
+  box_4_2:
+    label: "4.2M 箱式货车"
+    legend_count: 86
+    length_m: 4.2
+    width_m: 2.05
+    height_m: 2.65
+    color: "#6fb7d8"
+  box_9_6:
+    label: "9.6M 箱式货车"
+    legend_count: 65
+    length_m: 9.6
+    width_m: 2.45
+    height_m: 3.65
+    color: "#5fbf9a"
+  container_61ft:
+    label: "61尺 集卡"
+    legend_count: 59
+    length_m: 18.6
+    width_m: 2.5
+    height_m: 4.1
+    color: "#d8b46f"
+
+cables:
+  cat6:
+    label: "六类线"
+    color: "#22d3ee"
+  fiber:
+    label: "室外铠装六芯单模光纤"
+    color: "#d946ef"
+
+lighting:
+  tail_floodlight:
+    label_prefix: "SL"
+    install_height_m: 3.0
+    beam_length_m: 7.5
+    beam_angle_deg: 36
+    purpose: "车厢内部补光，配合车尾摄像头识别车厢内情况"

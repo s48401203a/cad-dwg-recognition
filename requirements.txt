@@ -1,0 +1,9 @@
+aiofiles>=23.0
+ezdxf>=1.4
+fastapi>=0.110
+matplotlib>=3.8
+playwright>=1.45
+python-multipart>=0.0.9
+PyYAML>=6.0
+uvicorn>=0.29
+websockets>=12.0

@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CAD DWG 识别 3D 预览工具</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="./css/style.css?v=63" />
+  <script src="./share-config.js?v=1"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.module.js",
+        "three/addons/": "./vendor/three/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1 class="brand-title" id="projectTitle">CAD 弱电图纸 3D 预览</h1>
+        <div class="brand-subtitle" id="projectSubtitle">上传 DWG/DXF，解析语义对象并生成 Three.js 交互模型</div>
+      </div>
+      <div class="top-actions">
+        <input id="fileInput" type="file" accept=".dwg,.dxf" multiple hidden />
+        <div class="action-menu" data-action-menu>
+          <button class="menu-trigger" type="button" aria-expanded="false">项目 ▾</button>
+          <div class="menu-panel" role="menu">
+            <button id="projectButton" type="button" role="menuitem">新建 / 选择项目</button>
+            <button id="parseButton" class="primary" type="button" role="menuitem" disabled>解析并生成 3D</button>
+            <button id="visualAuditButton" type="button" role="menuitem" disabled>生成审计截图</button>
+            <button id="openProjectDirButton" type="button" role="menuitem" disabled>打开项目目录</button>
+          </div>
+        </div>
+        <div class="action-menu" data-action-menu>
+          <button class="menu-trigger" type="button" aria-expanded="false">文件 / 分享 ▾</button>
+          <div class="menu-panel" role="menu">
+            <button id="uploadButton" type="button" role="menuitem">上传 DWG/DXF</button>
+            <button id="openSourceFileButton" type="button" role="menuitem" disabled>打开源 DWG/DXF</button>
+            <button id="staticExportButton" type="button" role="menuitem" disabled>导出静态 HTML</button>
+            <button id="shareLinkButton" type="button" role="menuitem" disabled>复制分享链接</button>
+          </div>
+        </div>
+        <span id="siteProfileSummary" class="profile-summary">场地: 快运</span>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="side-panel" id="sidePanel">
+        <section class="panel-section project-management-section" data-panel-section="projects">
+          <h2 class="section-title">项目管理 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠项目管理">▾</button></h2>
+          <div class="project-list" id="projectList"></div>
+        </section>
+
+        <section class="panel-section layer-control-section" data-panel-section="layers">
+          <div class="layer-control-head">
+            <h2 class="section-title">图层控制 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠图层控制">▾</button></h2>
+            <div class="display-mode-row">
+              <span>显示模式</span>
+              <button id="displayModeButton" class="mode-toggle" type="button" aria-pressed="true">自适应省略</button>
+            </div>
+            <div class="layer-actions" aria-label="图例批量操作">
+              <button type="button" data-layer-action="show-all">全部打开</button>
+              <button type="button" data-layer-action="hide-all">全部关闭</button>
+              <button type="button" data-panel-action="collapse-all">全部折叠</button>
+              <button type="button" data-panel-action="expand-all">全部展开</button>
+            </div>
+          </div>
+          <div class="layer-list layer-card-grid" id="layerList">
+            <div class="layer-row compact" draggable="true" data-layer-card="shell">
+              <label class="layer-card-main"><input type="checkbox" data-layer="shell" checked /><span>仓库建筑<small>地面 / 柱网 / 室内结构</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="shell.outerWall">
+              <label class="layer-card-main"><input type="checkbox" data-layer="shell.outerWall" checked /><span>仓库外墙<small>外圈墙体 / 轮廓</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="tower.level1">
+              <label class="layer-card-main"><input type="checkbox" data-layer="tower.level1" checked /><span>炮楼一层<small>一层区域 / 设备 / AP</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="tower.level2">
+              <label class="layer-card-main"><input type="checkbox" data-layer="tower.level2" checked /><span>炮楼二层<small>二层区域 / 设备 / AP</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="labels">
+              <label class="layer-card-main"><input type="checkbox" data-layer="labels" /><span>对象标签<small>编号 / 区域名</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="vehicles">
+              <label class="layer-card-main"><input type="checkbox" data-layer="vehicles" checked /><span>车辆月台<small>车位 / 车辆</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="spotlights">
+              <label class="layer-card-main"><input type="checkbox" data-layer="spotlights" checked /><span>车尾射灯<small>场地补光</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="device.ap">
+              <label class="layer-card-main"><input type="checkbox" data-layer="device.ap" checked /><span>AP 设备<small>无线 AP</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="coverage.ap">
+              <label class="layer-card-main"><input type="checkbox" data-layer="coverage.ap" checked /><span>AP 覆盖<small>WiFi 光锥</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="device.fisheye">
+              <label class="layer-card-main"><input type="checkbox" data-layer="device.fisheye" checked /><span>鱼眼设备<small>鱼眼</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="coverage.fisheye">
+              <label class="layer-card-main"><input type="checkbox" data-layer="coverage.fisheye" checked /><span>鱼眼覆盖<small>下投光锥</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="device.dome">
+              <label class="layer-card-main"><input type="checkbox" data-layer="device.dome" checked /><span>半球设备<small>办公半球</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="coverage.dome">
+              <label class="layer-card-main"><input type="checkbox" data-layer="coverage.dome" checked /><span>半球覆盖<small>图纸线条</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="device.bullet">
+              <label class="layer-card-main"><input type="checkbox" data-layer="device.bullet" checked /><span>枪机设备<small>车尾 / 墙面</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="coverage.bullet">
+              <label class="layer-card-main"><input type="checkbox" data-layer="coverage.bullet" checked /><span>枪机覆盖<small>平面扇形</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="device.cabinet">
+              <label class="layer-card-main"><input type="checkbox" data-layer="device.cabinet" checked /><span>机柜设备<small>网络机柜</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="cables">
+              <label class="layer-card-main"><input type="checkbox" data-layer="cables" checked /><span>弱电线路<small>桥架 / 主干</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="cables.cabinet">
+              <label class="layer-card-main"><input type="checkbox" data-layer="cables.cabinet" checked /><span>机柜电缆<small>机柜供电 / 综合电缆</small></span></label>
+            </div>
+            <div class="layer-row compact" draggable="true" data-layer-card="cables.spotlight">
+              <label class="layer-card-main"><input type="checkbox" data-layer="cables.spotlight" checked /><span>射灯电缆<small>补光灯供电线路</small></span></label>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel-section" data-panel-section="opacity">
+          <h2 class="section-title">透明度控制 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠透明度控制">▾</button></h2>
+          <div class="layer-opacity-control">
+            <div class="opacity-row"><span>全局透明度</span><strong id="opacityValue">100%</strong></div>
+            <input id="opacitySlider" type="range" min="25" max="100" value="100" />
+          </div>
+        </section>
+
+        <section class="panel-section" data-panel-section="model-scale">
+          <h2 class="section-title">模型大小 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠模型大小">▾</button></h2>
+          <div class="layer-opacity-control">
+            <div class="opacity-row"><span>设备模型</span><strong id="modelScaleValue">100%</strong></div>
+            <input id="modelScaleSlider" type="range" min="100" max="300" step="5" value="100" />
+          </div>
+        </section>
+
+        <section class="panel-section" data-panel-section="view">
+          <h2 class="section-title">视角控制 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠视角控制">▾</button></h2>
+          <div class="view-grid">
+            <button type="button" data-view="perspective">透视</button>
+            <button type="button" data-view="top">俯视</button>
+            <button type="button" data-view="rack">货架视角</button>
+            <button type="button" data-view="tower">炮楼视角</button>
+            <button type="button" data-view="zone">分区视角</button>
+          </div>
+          <button class="wide-button" style="margin-top:8px" type="button" data-view="reset">重置视角</button>
+        </section>
+
+        <section class="panel-section" data-panel-section="logs">
+          <h2 class="section-title">实时日志 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠实时日志">▾</button></h2>
+          <div class="log-panel" id="logPanel"></div>
+        </section>
+
+        <section class="panel-section" data-panel-section="process-notes" data-default-collapsed="true">
+          <h2 class="section-title">施工工艺要求 <button class="section-toggle" type="button" data-section-toggle aria-expanded="false" title="展开施工工艺要求">▾</button></h2>
+          <div class="notes-list" id="processNotesList">
+            <div class="inspector-empty">暂无施工工艺要求原文。</div>
+          </div>
+        </section>
+
+        <section class="panel-section" data-panel-section="removal-notes" data-default-collapsed="true">
+          <h2 class="section-title">老场地拆除清单（参考） <button class="section-toggle" type="button" data-section-toggle aria-expanded="false" title="展开老场地拆除清单（参考）">▾</button></h2>
+          <div class="notes-list" id="removalNotesList">
+            <div class="inspector-empty">暂无老场地拆除清单原文。</div>
+          </div>
+        </section>
+
+        <section class="panel-section" data-panel-section="drawings">
+          <h2 class="section-title">图纸列表 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠图纸列表">▾</button></h2>
+          <div class="drawing-list" id="drawingList"></div>
+        </section>
+
+      </aside>
+
+      <section class="canvas-wrap" id="canvasWrap">
+        <canvas id="scene"></canvas>
+        <button class="fullscreen-toggle" id="fullscreenButton" type="button" aria-pressed="false" title="全屏查看">全屏</button>
+        <div class="drop-hint" id="dropHint">
+          <strong>等待上传 DWG / DXF 图纸</strong>
+          <span>选择文件后点击解析，右侧会显示可点击的 3D 设备模型和对象属性。</span>
+        </div>
+        <div class="status-strip" id="statusStrip">
+          <div class="status-pill">设备 <strong id="statDevices">0</strong></div>
+          <div class="status-pill">线路 <strong id="statCables">0</strong></div>
+          <div class="status-pill">摄像头 <strong id="statCameras">0</strong></div>
+          <div class="status-pill">实体 <strong id="statEntities">0</strong></div>
+        </div>
+        <div class="frame-detection-bar hidden" id="frameDetectionBar" aria-live="polite">
+          <div class="frame-detection-head">
+            <div class="frame-detection-main">
+              <span id="frameSummary">图框 0</span>
+              <span id="baseViewSummary">base_view -</span>
+              <span id="canonicalViewsSummary">canonical_views 0</span>
+            </div>
+            <div class="frame-panel-actions">
+              <button class="frame-panel-text-toggle" id="framePreviewToggle" type="button" aria-pressed="false" title="隐藏图纸布局预览">隐藏预览</button>
+              <button class="frame-panel-text-toggle" id="framePanelHide" type="button" title="隐藏图纸图层面板">隐藏</button>
+              <button class="frame-panel-toggle" id="framePanelToggle" type="button" aria-expanded="true" title="收起图纸图层">收起</button>
+            </div>
+          </div>
+          <div class="frame-panel-body" id="framePanelBody">
+            <div class="frame-switch-list" id="frameSwitchList"></div>
+            <form class="frame-reparse-form" id="reparseForm">
+              <input id="bboxInput" type="text" inputmode="decimal" placeholder="min_x,min_y,max_x,max_y" aria-label="手动输入 bbox" />
+              <button id="reparseButton" type="submit" disabled>重解析</button>
+            </form>
+            <div class="frame-preview hidden" id="framePreview">
+              <svg id="framePreviewSvg" role="img" aria-label="图框预览与手动框选"></svg>
+              <small>点击绿色主图写入 bbox，或拖拽框选主图后重解析。</small>
+            </div>
+          </div>
+        </div>
+        <button class="frame-panel-restore hidden" id="framePanelRestore" type="button">图纸图层</button>
+        <div class="parse-progress-panel hidden" id="parseProgressPanel" aria-live="polite">
+          <div class="parse-progress-head">
+            <span id="parseProgressStage">等待上传</span>
+            <strong id="parseProgressPercent">0%</strong>
+          </div>
+          <div class="parse-progress-track">
+            <div class="parse-progress-bar" id="parseProgressBar"></div>
+          </div>
+          <div class="parse-progress-summary" id="parseProgressSummary">请选择 DWG/DXF 图纸</div>
+        </div>
+        <div class="upload-parse-prompt hidden" id="uploadParsePrompt" aria-live="polite">
+          <div class="upload-parse-copy">
+            <strong>上传完成</strong>
+            <span id="uploadParsePromptSummary">是否立即解析生成 3D 模型？</span>
+          </div>
+          <div class="upload-parse-actions">
+            <button class="primary" id="uploadParseNowButton" type="button">解析并生成 3D</button>
+            <button id="uploadParseDismissButton" type="button">稍后</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="inspector-panel">
+        <section class="panel-section">
+          <h2 class="section-title">对象信息</h2>
+          <div id="inspector" class="inspector-empty">点击场景中的设备、区域或线路查看属性。</div>
+        </section>
+        <section class="panel-section">
+          <h2 class="section-title">识别统计</h2>
+          <div class="metric-grid">
+            <div class="metric"><b id="metricDevices">0</b><span>设备</span></div>
+            <div class="metric"><b id="metricCameras">0</b><span>摄像头</span></div>
+            <div class="metric"><b id="metricAps">0</b><span>AP</span></div>
+            <div class="metric"><b id="metricReview">0</b><span>待审核</span></div>
+          </div>
+        </section>
+        <section class="panel-section">
+          <h2 class="section-title">待审核列表</h2>
+          <div id="reviewList" class="review-list">
+            <div class="inspector-empty">暂无待审核条目。</div>
+          </div>
+        </section>
+        <section class="panel-section">
+          <h2 class="section-title">图例说明</h2>
+          <div class="legend-list">
+            <div class="legend-item"><span class="swatch" style="background:var(--violet)"></span><span>鱼眼摄像头</span></div>
+            <div class="legend-item"><span class="swatch" style="background:#b79cff"></span><span>半球摄像头</span></div>
+            <div class="legend-item"><span class="swatch" style="background:var(--red)"></span><span>枪型 / 车尾摄像头</span></div>
+            <div class="legend-item"><span class="swatch" style="background:var(--cyan)"></span><span>无线 AP 覆盖</span></div>
+            <div class="legend-item"><span class="swatch" style="background:var(--gold)"></span><span>桥架 / 主干线路</span></div>
+            <div class="legend-item"><span class="swatch" style="background:var(--green)"></span><span>机柜电缆</span></div>
+            <div class="legend-item"><span class="swatch" style="background:#ffc857"></span><span>射灯电缆</span></div>
+            <div class="legend-item"><span class="swatch" style="background:#89918b"></span><span>参考地面网格</span></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="projectModal">
+    <div class="modal">
+      <header><h2>选择项目保存位置</h2></header>
+      <div class="modal-body">
+        <div class="form-grid">
+          <label class="form-field">项目名称<input id="projectNameInput" type="text" value="未命名弱电项目" /></label>
+          <label class="form-field">保存目录<input id="saveDirInput" type="text" placeholder="留空则使用后端默认项目库" /></label>
+          <div>
+            <h3 class="section-title">已有项目</h3>
+            <div class="project-list" id="modalProjectList"></div>
+          </div>
+        </div>
+      </div>
+      <footer>
+        <button id="cancelProjectButton" type="button">取消</button>
+        <button id="confirmProjectButton" class="primary" type="button">确认项目</button>
+      </footer>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="siteProfileModal">
+    <div class="modal">
+      <header><h2>选择场地类型</h2></header>
+      <div class="modal-body">
+        <div class="profile-options">
+          <label class="profile-option"><input id="siteProfileExpress" type="checkbox" value="express" checked /><span><strong>快运场地</strong><small>月台、车尾、射灯、AP、鱼眼、半球、机柜</small></span></label>
+          <label class="profile-option"><input id="siteProfileSupplyChain" type="checkbox" value="supply_chain" /><span><strong>仓储供应链场地</strong><small>供应链仓储框架，货架/工位/分拣/DWS 后续启用</small></span></label>
+        </div>
+      </div>
+      <footer>
+        <button id="cancelSiteProfileButton" type="button">取消</button>
+        <button id="confirmSiteProfileButton" class="primary" type="button">确认并上传</button>
+      </footer>
+    </div>
+  </div>
+
+  <script type="module" src="./js/app.js?v=91"></script>
+</body>
+</html>

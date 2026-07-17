@@ -1,0 +1,147 @@
+version: "1.1"
+
+block_rules:
+  security.camera.fisheye:
+    keywords: [鱼眼, fisheye, FISHEYE]
+    confidence: 0.96
+  security.camera.dome:
+    keywords: [半球]
+    confidence: 0.96
+  security.camera.rear:
+    keywords: [车尾摄像头, 车尾, rear]
+    confidence: 0.95
+  security.camera.bullet:
+    keywords: [枪型, 枪机, 6mm, bullet, BULLET]
+    confidence: 0.95
+  security.camera:
+    keywords: [摄像头, 摄像, CAM, CCTV, IPC, DOME, PTZ, CAMERA]
+    confidence: 0.90
+  network.ap:
+    keywords: [AP, WAP, WIFI, ap moto, 无线AP, ACCESS_POINT]
+    confidence: 0.94
+  network.switch:
+    keywords: [SW, SWITCH, 交换机, L2SW, L3SW, HUB]
+    confidence: 0.92
+  network.cabinet:
+    keywords: [机柜, RACK, CABINET, IDF, MDF, 弱电柜]
+    confidence: 0.92
+  network.outlet:
+    keywords: [信息点, RJ45, DATA, 网口, 信息插座]
+    confidence: 0.90
+
+layer_rules:
+  cable.security:
+    keywords: [IT弱电规划-摄像机, CCTV, 监控, 摄像头, CAM, IPC]
+    confidence: 0.88
+  cable.network:
+    keywords: [IT弱电规划-网络&广播, 网络, 网线, CAT6, UTP, RJ45, AP, WIFI, 无线, WIRELESS]
+    confidence: 0.84
+  cable.trunk:
+    keywords: [桥架, TRAY, 线槽, CABLETRAY, 弱电管线, 管线]
+    confidence: 0.82
+  cable.fiber:
+    keywords: [光纤, FIBER, FO, 光缆]
+    confidence: 0.85
+  cable.unknown:
+    keywords: ["247", "240", "20", "21", "22", "23", "151", "28"]
+    confidence: 0.40
+
+native_cable_layer_rules:
+  cable.trunk:
+    keywords: [桥架, CABLETRAY, CABLE_TRAY, TRAY, 线槽, WIRE_TRAY]
+    confidence: 0.90
+  cable.security:
+    keywords: [监控, 视频, CCTV, SECURITY]
+    confidence: 0.86
+  cable.network:
+    keywords: [网络, 数据, 网线, NETWORK, DATA, UTP, 光纤, FIBER]
+    confidence: 0.86
+  cable.cabinet_power:
+    keywords: [机柜电缆, 机柜供电, 配电, POWER_CABINET, PWR_CAB]
+    confidence: 0.84
+  cable.spotlight_power:
+    keywords: [射灯电缆, 射灯供电, SPOTLIGHT_PWR, SPOT_PWR]
+    confidence: 0.84
+  cable.cascade:
+    keywords: [级联, CASCADE, UPLINK]
+    confidence: 0.84
+
+native_cable_fallback_layers:
+  - layer: CABLETRAY_DIM
+    type: cable.trunk
+    confidence: 0.45
+    auto_keep: true
+  - layer: LAYER3
+    type: cable.trunk
+    confidence: 0.35
+    auto_keep: true
+  - layer: S_SURFACE
+    type: cable.trunk
+    confidence: 0.35
+    auto_keep: true
+  - layer: "0"
+    type: cable.unknown
+    confidence: 0.20
+    auto_keep: false
+
+text_rules:
+  cable.security:
+    keywords: [监控线, 视频线, 摄像机线路, 摄像机]
+    confidence: 0.72
+  cable.network:
+    keywords: [网线, 网络线, AP线路, 无线AP, 信息点]
+    confidence: 0.72
+
+structure_rules:
+  building.wall:
+    layers:
+      - "WALL-填充墙(厚)"
+      - "WALL-砼墙"
+      - "WALL-防火墙"
+      - "WALL-非承重墙(薄)"
+      - "A-砼墙"
+      - "A-WALL-CONC"
+      - "A-WALL-PRTN"
+      - "A-WALL"
+      - "A-WALL-BRIC"
+      - "A-填充墙(厚)"
+      - "A-SECT-WALL"
+      - "D-墙体"
+      - "00-原始墙体"
+      - "1200护墙"
+      - "防火分区示意"
+    entity_types: [LINE, LWPOLYLINE, POLYLINE]
+    confidence: 0.90
+  building.column:
+    layers:
+      - "COLU-砼柱"
+      - "COLU-钢柱"
+      - "钢柱"
+      - "柱"
+      - "COLU-构造柱"
+      - "S-COLU"
+      - "A-COLU-STEL"
+    entity_types: [CIRCLE, INSERT, LWPOLYLINE, POLYLINE]
+    confidence: 0.90
+  building.outline:
+    layers:
+      - "GEN-轮廓线"
+      - "ZX-建筑轮廓线"
+      - "ZX-围墙"
+      - "1轮廓实线层"
+      - "A-FLOR-ROOF"
+      - "总图-建筑"
+      - "建筑轮廓"
+    entity_types: [LINE, LWPOLYLINE, POLYLINE]
+    confidence: 0.88
+  building.platform:
+    layers:
+      - "STRS-楼梯、台阶、坡道、升降平台、月台、救援平台"
+      - "STRS-楼梯、台阶、坡道"
+      - "A-FLOR-STRS"
+      - "PARK-停车位"
+      - "P-停车位"
+      - "车位"
+      - "防撞设施"
+    entity_types: [LINE, LWPOLYLINE, POLYLINE]
+    confidence: 0.85

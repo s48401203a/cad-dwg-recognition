@@ -1,0 +1,27 @@
+[project]
+name = "cad-dwg-parser"
+version = "0.1.0"
+description = "CAD 弱电图纸 3D 解析工具"
+requires-python = ">=3.10"
+dependencies = [
+    "aiofiles>=23.0",
+    "ezdxf>=1.4",
+    "fastapi>=0.110",
+    "matplotlib>=3.8",
+    "playwright>=1.45",
+    "python-multipart>=0.0.9",
+    "PyYAML>=6.0",
+    "uvicorn>=0.29",
+    "websockets>=12.0",
+]
+
+[tool.ruff]
+line-length = 140
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false

@@ -1,0 +1,11 @@
+version: "0.1"
+default_profiles: ["express"]
+profiles:
+  - id: "express"
+    file: "express.yaml"
+    display_name: "快运场地"
+    site_type: "express"
+  - id: "supply_chain"
+    file: "supply-chain.yaml"
+    display_name: "仓储供应链场地"
+    site_type: "supply_chain"

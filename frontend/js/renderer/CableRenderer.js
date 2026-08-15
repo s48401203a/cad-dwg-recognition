@@ -144,6 +144,8 @@ export class CableRenderer {
     if (type === "cable.network") return 0x22d3ee;
     if (type === "cable.cabinet_power") return 0x7ddc83;
     if (type === "cable.spotlight_power") return 0xffc857;
+    if (type === "cable.power") return 0xff4444;
+    if (type === "cable.lighting") return 0xffe08a;
     return 0x8bdde8;
   }
 
@@ -152,6 +154,8 @@ export class CableRenderer {
     if (Number.isFinite(explicit) && explicit > 0) return explicit;
     if (cable.type === "cable.cabinet_power") return 2.8;
     if (cable.type === "cable.spotlight_power") return 3.0;
+    if (cable.type === "cable.power") return 3.05;
+    if (cable.type === "cable.lighting") return 3.0;
     return cable.type === "cable.trunk" ? 3.1 : 0.12;
   }
 }

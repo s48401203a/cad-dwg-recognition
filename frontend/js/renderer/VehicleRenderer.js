@@ -135,25 +135,53 @@ export class VehicleRenderer {
     group.rotation.y = this._yawFromCadAngle(fixture.orientation?.angle_deg || 0);
     group.userData = { selectable: true, entity: fixture, kind: "fixture" };
 
+    if (height > 0.2) {
+      const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04 * modelScale, 0.05 * modelScale, height, 10),
+        mat(0x3f4541, 1, 0.18),
+      );
+      pole.position.y = -height / 2;
+      group.add(pole);
+      const foot = new THREE.Mesh(
+        new THREE.CircleGeometry(0.38 * modelScale, 24),
+        new THREE.MeshBasicMaterial({ color: 0xf4b43a, transparent: true, opacity: 0.55, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      foot.rotation.x = -Math.PI / 2;
+      foot.position.y = -height + 0.03;
+      group.add(foot);
+    }
+
     const housing = new THREE.Mesh(
-      new THREE.BoxGeometry(0.38 * modelScale, 0.24 * modelScale, 0.22 * modelScale),
-      mat(0xf4b43a, 1, 0.12),
+      new THREE.BoxGeometry(0.62 * modelScale, 0.34 * modelScale, 0.36 * modelScale),
+      new THREE.MeshStandardMaterial({
+        color: 0xf4b43a,
+        roughness: 0.38,
+        metalness: 0.16,
+        emissive: 0xb45309,
+        emissiveIntensity: 0.35,
+      }),
     );
-    housing.position.x = 0.22 * modelScale;
+    housing.position.x = 0.18 * modelScale;
     group.add(housing);
 
     const lens = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.12 * modelScale, 0.12 * modelScale, 0.04 * modelScale, 16),
-      mat(0xfff3b0, 0.95, 0.02),
+      new THREE.CylinderGeometry(0.16 * modelScale, 0.16 * modelScale, 0.05 * modelScale, 16),
+      new THREE.MeshStandardMaterial({
+        color: 0xfff3b0,
+        roughness: 0.18,
+        metalness: 0.04,
+        emissive: 0xffd166,
+        emissiveIntensity: 0.55,
+      }),
     );
     lens.rotation.x = Math.PI / 2;
-    lens.position.set(0.22 * modelScale, 0, -0.13 * modelScale);
+    lens.position.set(0.18 * modelScale, 0, -0.2 * modelScale);
     group.add(lens);
 
     const beamRadius = Math.tan(beamAngle / 2) * beamLength;
     const beam = new THREE.Mesh(
-      new THREE.CylinderGeometry(beamRadius, 0.08, beamLength, 28, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.14, depthWrite: false, side: THREE.DoubleSide }),
+      new THREE.CylinderGeometry(beamRadius, 0.1, beamLength, 28, 1, true),
+      new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: 0.26, depthWrite: false, side: THREE.DoubleSide }),
     );
     beam.rotation.x = -Math.PI / 2;
     beam.position.z = -beamLength / 2;

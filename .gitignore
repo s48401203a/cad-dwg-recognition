@@ -12,12 +12,14 @@ backend/uploads/
 backend/projects/
 backend/logs/
 backups/
+archives/
 projects/
 backend/projects-archive/
 
 # Generated CAD / semantic outputs
 *.dwg
 *.dxf
+!tests/fixtures/**/*.dxf
 **/semantic.json
 **/*.semantic.json
 output/replay/
@@ -35,13 +37,13 @@ ENVIRONMENT_SETUP.md
 docs/*
 !docs/assets/
 !docs/assets/demo-sanitized.png
+!docs/generic-cad-eval.html
 
 # Customer-specific rules, baselines, and internal automation are retained locally
 backend/config/layer_render_standards.yaml
 backend/config/profiles/baishi-*.yaml
 orchestrator/
 skills/
-tests/
 tools/
 启动反推隔离验证.command
 停止反推隔离验证.command
@@ -61,6 +63,10 @@ wheelhouse/
 node_modules/
 dist/
 build/
+.vite/
+.vite-dev.pid
+.vite-dev.url
+.vite-api.target
 
 # Logs and local env
 *.log

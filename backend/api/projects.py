@@ -64,6 +64,13 @@ class LocalOpenRequest(BaseModel):
     drawing_id: str | None = None
 
 
+class PlacementOverridesBody(BaseModel):
+    site: dict[str, Any] | None = None
+    instances: list[dict[str, Any]] | None = None
+    circuits: list[dict[str, Any]] | None = None
+    apply_standard_heights: bool = False
+
+
 class ProjectReparse(BaseModel):
     drawing_id: str | None = None
     site_profiles: list[str] | None = None
@@ -213,6 +220,68 @@ async def create_project(payload: ProjectCreate) -> dict[str, Any]:
         meta["site_profiles"] = payload.site_profiles
         save_project(meta)
     return meta
+
+
+@router.get("/model-catalog")
+async def get_model_catalog() -> dict[str, Any]:
+    from placement import load_catalog
+
+    catalog = load_catalog()
+    return {
+        "version": catalog["version"],
+        "site_defaults": catalog["site_defaults"],
+        "groups": catalog.get("groups") or [],
+        "items": catalog["items"],
+    }
+
+
+@router.post("/projects/{project_id}/placement/ensure")
+async def ensure_placement(project_id: str) -> dict[str, Any]:
+    assert_project_allowed(project_id)
+    meta = load_project(project_id, include_archived=True)
+    if not meta:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    ensure_project_active(meta)
+    from placement import ensure_placement_scene, is_placement_project
+
+    if not is_placement_project(meta):
+        raise HTTPException(status_code=403, detail="该项目不是摆放试验场，不能初始化摆放场景")
+    return ensure_placement_scene(meta)
+
+
+@router.get("/projects/{project_id}/model-overrides")
+async def get_model_overrides(project_id: str) -> dict[str, Any]:
+    assert_project_allowed(project_id)
+    meta = load_project(project_id, include_archived=True)
+    if not meta:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    from placement import load_overrides
+
+    return load_overrides(meta)
+
+
+@router.put("/projects/{project_id}/model-overrides")
+async def put_model_overrides(project_id: str, payload: PlacementOverridesBody) -> dict[str, Any]:
+    assert_project_allowed(project_id)
+    meta = load_project(project_id, include_archived=True)
+    if not meta:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    ensure_project_active(meta)
+    from placement import apply_standard_heights, ensure_placement_scene, is_placement_project, save_overrides
+
+    if not is_placement_project(meta):
+        raise HTTPException(status_code=403, detail="该项目不是摆放试验场，不能写入模型覆盖")
+
+    data = {
+        "site": payload.site or {},
+        "instances": payload.instances or [],
+        "circuits": payload.circuits or [],
+    }
+    if payload.apply_standard_heights:
+        data = apply_standard_heights(data)
+    saved = save_overrides(meta, data)
+    ensure_placement_scene(meta)
+    return saved
 
 
 @router.get("/projects/{project_id}")

@@ -1,0 +1,30 @@
+# Public evaluation cases. Do not put customer DWG paths here.
+# Local project scans are discovered at runtime and stay in exports/eval/.
+
+version: "1"
+default_profile: generic
+
+cases:
+  - id: generic_electrical_min
+    name: 通用强弱电最小图
+    kind: fixture
+    dxf: tests/fixtures/generic_electrical_min.dxf
+    profile: generic
+    notes: 用行业通用中文图层/块名，不含百世场地编号或炮楼规则。
+    baseline:
+      devices_by_type:
+        security.camera: 1
+        network.ap: 1
+        network.cabinet: 1
+      render_ready: true
+    desired:
+      devices_by_type:
+        security.camera: 1
+        network.ap: 1
+        network.cabinet: 1
+        power.distribution: 1
+        lighting.fixture: 1
+      cables_min: 1
+      structures_min: 1
+      render_ready: true
+      max_specificity: 0.35

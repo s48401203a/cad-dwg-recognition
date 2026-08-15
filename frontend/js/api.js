@@ -114,6 +114,22 @@ export const api = {
       body: JSON.stringify({ drawing_id: drawingId }),
     });
   },
+  getModelCatalog() {
+    return request("/api/model-catalog");
+  },
+  ensurePlacementScene(projectId) {
+    return request(`/api/projects/${projectId}/placement/ensure`, { method: "POST" });
+  },
+  getModelOverrides(projectId) {
+    return request(`/api/projects/${projectId}/model-overrides`);
+  },
+  saveModelOverrides(projectId, payload) {
+    return request(`/api/projects/${projectId}/model-overrides`, {
+      method: "PUT",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    });
+  },
   captureVisualAudit(projectId, payload = {}) {
     return request(`/api/projects/${projectId}/visual-audit/capture`, {
       method: "POST",

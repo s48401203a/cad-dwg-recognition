@@ -1,0 +1,255 @@
+version: "1.1"
+site_defaults:
+  length_m: 80
+  width_m: 50
+  wall_height_m: 10.5
+  roof_peak_height_m: 12.6
+  dock_height_m: 1.2
+groups:
+  - id: network
+    label: 网络
+  - id: camera
+    label: 摄像头
+  - id: lighting
+    label: 照明
+  - id: cabinet
+    label: 机柜电源
+  - id: cable
+    label: 线路
+  - id: site
+    label: 场地办公
+items:
+  - id: network.ap.warehouse
+    type: network.ap
+    label: 库区 AP
+    group: network
+    family: ap
+    kind: device
+    install_height_m: 6.0
+    mount: suspended
+    zone: warehouse
+  - id: network.ap.office
+    type: network.ap
+    label: 办公 AP
+    group: network
+    family: ap
+    kind: device
+    install_height_m: 3.2
+    mount: ceiling
+    zone: office
+  - id: security.camera.bullet
+    type: security.camera.bullet
+    label: 墙面枪机
+    group: camera
+    family: camera
+    kind: device
+    install_height_m: 3.5
+    mount: wall
+  - id: security.camera.fisheye
+    type: security.camera.fisheye
+    label: 鱼眼
+    group: camera
+    family: camera
+    kind: device
+    install_height_m: 5.0
+    mount: suspended
+  - id: security.camera.dome
+    type: security.camera.dome
+    label: 半球
+    group: camera
+    family: camera
+    kind: device
+    install_height_m: 3.0
+    mount: ceiling
+  - id: security.camera.rear
+    type: security.camera.rear
+    label: 车尾摄像头
+    group: camera
+    family: camera
+    kind: device
+    install_height_m: 2.9
+    mount: suspended
+  - id: lighting.floodlight
+    type: lighting.floodlight
+    label: 车尾射灯
+    group: lighting
+    family: light
+    kind: fixture
+    install_height_m: 3.0
+    mount: suspended
+    beam_length_m: 7.5
+    beam_angle_deg: 36
+  - id: lighting.fixture
+    type: lighting.fixture
+    label: 筒灯
+    group: lighting
+    family: light
+    kind: device
+    install_height_m: 4.5
+    mount: ceiling
+  - id: network.cabinet.wall
+    type: network.cabinet
+    label: 挂墙机柜
+    group: cabinet
+    family: cabinet
+    kind: device
+    install_height_m: 3.5
+    mount: wall
+    rack_units: 12
+    top_edge_height_m: 3.5
+  - id: network.cabinet.42u
+    type: network.cabinet
+    label: 42U 落地柜
+    group: cabinet
+    family: cabinet
+    kind: device
+    install_height_m: 0
+    mount: floor
+    rack_units: 42
+  - id: network.cabinet.ups
+    type: network.cabinet
+    label: UPS 电源
+    group: cabinet
+    family: cabinet
+    kind: device
+    install_height_m: 0
+    mount: floor
+    rack_units: 42
+    role: ups_power
+  - id: network.cabinet.battery
+    type: network.cabinet
+    label: UPS 电池柜
+    group: cabinet
+    family: cabinet
+    kind: device
+    install_height_m: 0
+    mount: floor
+    rack_units: 42
+    role: ups_battery
+  - id: power.distribution
+    type: power.distribution
+    label: 配电箱
+    group: cabinet
+    family: power
+    kind: device
+    install_height_m: 1.4
+    mount: wall
+  - id: power.breaker
+    type: power.distribution
+    label: 射灯空开
+    group: cabinet
+    family: power
+    kind: device
+    install_height_m: 1.4
+    mount: wall
+    role: breaker
+    lights_per_breaker: 3
+  - id: cable.trunk
+    type: cable.trunk
+    label: 桥架
+    group: cable
+    family: tray
+    kind: cable
+    install_height_m: 3.5
+    segment_length_m: 8
+  - id: cable.security
+    type: cable.security
+    label: 监控线
+    group: cable
+    family: tray
+    kind: cable
+    install_height_m: 3.2
+    segment_length_m: 8
+  - id: cable.network
+    type: cable.network
+    label: 网络线
+    group: cable
+    family: tray
+    kind: cable
+    install_height_m: 3.2
+    segment_length_m: 8
+  - id: cable.power
+    type: cable.power
+    label: 强电干线
+    group: cable
+    family: tray
+    kind: cable
+    install_height_m: 3.0
+    segment_length_m: 8
+  - id: cable.spotlight_power
+    type: cable.spotlight_power
+    label: 射灯强电
+    group: cable
+    family: power
+    kind: cable
+    install_height_m: 3.0
+    segment_length_m: 8
+  - id: office.workstation
+    type: office.workstation
+    label: 工位
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+  - id: office.l_desk
+    type: office.l_desk
+    label: L 型桌
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+  - id: office.meeting_table
+    type: office.meeting_table
+    label: 圆桌
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+    radius_m: 0.7
+  - id: office.partition
+    type: office.partition
+    label: 隔断
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+    segment_length_m: 3
+  - id: logistics.conveyor_belt
+    type: logistics.conveyor_belt
+    label: 传送带
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+    segment_length_m: 6
+  - id: logistics.dws_host
+    type: logistics.dws_host
+    label: DWS 主机
+    group: site
+    family: office
+    kind: office
+    install_height_m: 0
+  - id: building.column
+    type: building.column
+    label: 柱
+    group: site
+    family: structure
+    kind: structure
+    install_height_m: 0
+  - id: building.rack
+    type: building.rack
+    label: 货架
+    group: site
+    family: structure
+    kind: structure
+    install_height_m: 0
+  - id: parking.truck_bay
+    type: parking.truck_bay
+    label: 车位
+    group: site
+    family: parking
+    kind: parking
+    install_height_m: 0
+    vehicle_length_m: 9.6
+    vehicle_width_m: 2.45
+    vehicle_height_m: 3.65

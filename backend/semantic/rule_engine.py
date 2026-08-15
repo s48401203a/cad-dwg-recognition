@@ -372,6 +372,37 @@ class RuleEngine:
         self.source_record: dict[str, Any] = {}
         self.suppressed_inferences: list[dict[str, Any]] = []
 
+    def _promote_native_cables(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        promoted: list[dict[str, Any]] = []
+        for item in candidates:
+            cable_type = str(item.get("type") or "")
+            if not cable_type.startswith("cable."):
+                continue
+            if cable_type == "cable.unknown" and float(item.get("confidence") or 0) < 0.5:
+                continue
+            if not (item.get("geometry") or {}).get("points"):
+                continue
+            clone = deepcopy(item)
+            clone["route_source"] = "cad_polyline"
+            clone.pop("pending_promotion", None)
+            attrs = dict(clone.get("attributes") or {})
+            attrs["source_kind"] = attrs.get("source_kind") or "cad_native_line"
+            attrs["promoted"] = True
+            clone["attributes"] = attrs
+            if float(clone.get("confidence") or 0) >= 0.75 and cable_type != "cable.unknown":
+                clone["review_needed"] = False
+            promoted.append(clone)
+        return promoted
+
+    def _is_generic_mode(self) -> bool:
+        profiles = {str(item) for item in (self.site_profiles or [])}
+        if profiles & {"express", "supply_chain"}:
+            return False
+        return "generic" in profiles or not profiles
+
+    def _uses_site_layout_inferences(self) -> bool:
+        return bool({str(item) for item in (self.site_profiles or [])} & {"express", "supply_chain"})
+
     @classmethod
     def available_site_profiles(cls, profiles_dir: Path = DEFAULT_PROFILES_DIR) -> dict[str, Any]:
         index_path = profiles_dir / "_index.yaml"
@@ -394,13 +425,11 @@ class RuleEngine:
         profiles_dir: Path = DEFAULT_PROFILES_DIR,
     ) -> list[str]:
         if not site_profiles:
-            if require_explicit:
-                raise ValueError("请选择至少一个场地类型 profile 后再解析")
-            site_profiles = ["express"]
+            site_profiles = ["generic"]
         registry = cls.available_site_profiles(profiles_dir)
         allowed = {str(item.get("id")) for item in registry.get("profiles", []) if item.get("id")}
         if not allowed:
-            allowed = {"express"}
+            allowed = {"generic", "express", "supply_chain"}
         normalized: list[str] = []
         for profile in site_profiles:
             profile_id = str(profile or "").strip()
@@ -412,7 +441,7 @@ class RuleEngine:
                 normalized.append(profile_id)
         if require_explicit and not normalized:
             raise ValueError("请选择至少一个场地类型 profile 后再解析")
-        return normalized or ["express"]
+        return normalized or ["generic"]
 
     def _normalize_modelspace_units(self, parsed: dict[str, Any]) -> dict[str, Any]:
         scale = self._infer_modelspace_scale_to_mm(parsed.get("entities", []))
@@ -835,7 +864,7 @@ class RuleEngine:
             semantic_type = classification["type"]
             confidence = float(classification["confidence"])
 
-            if self._is_device_type(semantic_type) and entity.get("geometry", {}).get("type") == "Point":
+            if self._is_device_type(semantic_type) and entity.get("geometry", {}).get("type") in {"Point", "Circle"}:
                 position = entity.get("geometry", {}).get("position")
                 if position and not self._is_model_device_point(position, entity, semantic_type):
                     continue
@@ -869,7 +898,10 @@ class RuleEngine:
                 expected["ap"] = fallback_ap_count
         expected_sources = self._expected_inventory_sources(model_entities, expected)
         office_model = self._infer_office_model(model_entities)
-        cables.extend(self._infer_tray_cables(model_entities))
+        if self._is_generic_mode():
+            cables.extend(self._promote_native_cables(cable_candidates))
+        else:
+            cables.extend(self._infer_tray_cables(model_entities))
         devices = [self._fold_item_geometry(device) for device in devices]
         devices = self._filter_project_device_exclusions(devices)
         cables = self._dedup_linear_items([self._fold_item_geometry(cable) for cable in cables])
@@ -881,17 +913,20 @@ class RuleEngine:
         devices = self._filter_no_main_plan_rear_symbol_copies(devices)
         devices = self._filter_parameter_camera_symbol_duplicates(devices)
         self._repair_duplicate_ap_labels(devices, parsed["entities"])
-        devices.extend(self._infer_missing_expected_ap_devices(devices, parsed["entities"], office_model))
+        if not self._is_generic_mode():
+            devices.extend(self._infer_missing_expected_ap_devices(devices, parsed["entities"], office_model))
         devices = [self._normalize_office_device(device, office_model) for device in devices]
         devices = self._dedup_cabinet_labels(devices)
         devices = self._filter_secondary_system_view_cabinets(devices)
-        devices = self._ensure_ups_battery_cabinet(devices)
+        if not self._is_generic_mode():
+            devices = self._ensure_ups_battery_cabinet(devices)
         self._apply_power_equipment_clearance(devices)
         self._apply_camera_parameter_notes(devices, parsed["entities"])
         self._annotate_cabinets(devices)
-        cables.extend(self._infer_cabinet_links(devices))
-        cables.extend(self._infer_office_device_links(devices))
-        cables.extend(self._infer_single_cabinet_device_links(devices))
+        if self._uses_site_layout_inferences():
+            cables.extend(self._infer_cabinet_links(devices))
+            cables.extend(self._infer_office_device_links(devices))
+            cables.extend(self._infer_single_cabinet_device_links(devices))
         cables = self._dedup_linear_items(cables)
         self._renumber_generated_labels(devices)
         self._apply_cad_coverage_overlays(devices, model_entities)
@@ -905,17 +940,24 @@ class RuleEngine:
         site = self._site_metadata(analysis_entities)
         areas = self._infer_areas(model_entities, office_model)
         shell_area = self._infer_warehouse_shell(structures, devices)
-        if not shell_area and not (self.base_view and self.base_view.get("no_main_plan_mode")):
+        if (
+            not shell_area
+            and not self._is_generic_mode()
+            and not (self.base_view and self.base_view.get("no_main_plan_mode"))
+        ):
             shell_area = self._infer_operational_shell(devices)
         if shell_area:
             areas.insert(0, shell_area)
         self._orient_site_bullet_cameras(devices, shell_area, model_entities)
-        parking_spaces, fixtures = self._infer_tail_dock_objects(devices, structures, office_model, shell_area, model_entities)
-        parking_spaces, fixtures = self._suppress_unanchored_tail_dock_inferences(parking_spaces, fixtures)
-        parking_spaces = self._apply_project_rear_camera_tail_gap_to_parking_spaces(parking_spaces)
-        self._orient_bullet_cameras_by_cad_parking(devices, parking_spaces)
-        cables.extend(self._infer_cabinet_power_cables(devices))
-        cables.extend(self._infer_spotlight_cables(fixtures, devices))
+        if self._uses_site_layout_inferences():
+            parking_spaces, fixtures = self._infer_tail_dock_objects(devices, structures, office_model, shell_area, model_entities)
+            parking_spaces, fixtures = self._suppress_unanchored_tail_dock_inferences(parking_spaces, fixtures)
+            parking_spaces = self._apply_project_rear_camera_tail_gap_to_parking_spaces(parking_spaces)
+            self._orient_bullet_cameras_by_cad_parking(devices, parking_spaces)
+            cables.extend(self._infer_cabinet_power_cables(devices))
+            cables.extend(self._infer_spotlight_cables(fixtures, devices))
+        else:
+            parking_spaces, fixtures = [], []
         cables = self._dedup_linear_items(cables)
         cables = self._filter_project_cable_exclusions(cables)
         cable_candidates = self._dedup_linear_items(
@@ -1050,7 +1092,9 @@ class RuleEngine:
                 continue
             geometry = entity.get("geometry")
             anchor = self._geometry_anchor(geometry or {})
-            if not anchor or self._plan_copy_index(anchor) is None:
+            if not anchor:
+                continue
+            if not self._is_generic_mode() and self._plan_copy_index(anchor) is None:
                 continue
             layer = str(entity.get("layer", ""))
             main_outline = self._main_plan_outline_structure(entity, layer, entity_type, geometry or {})
@@ -2368,7 +2412,7 @@ class RuleEngine:
 
     @staticmethod
     def _is_device_type(semantic_type: str) -> bool:
-        return semantic_type.startswith(("security.camera", "network."))
+        return semantic_type.startswith(("security.camera", "network.", "power.", "lighting."))
 
     @staticmethod
     def _camera_label_number(label: str, prefix: str) -> int | None:
@@ -3047,6 +3091,12 @@ class RuleEngine:
         site_defaults = self.standards.get("site", {})
         heights = self._infer_warehouse_heights(entities)
         site_type = "mixed" if len(self.site_profiles) > 1 else self.site_profiles[0]
+        if self._is_generic_mode():
+            return {
+                "site_type": site_defaults.get("site_type") or "generic",
+                "site_profiles": self.site_profiles,
+                "source": "generic_cad_layers",
+            }
         return {
             "site_type": site_type if len(self.site_profiles) > 1 else site_defaults.get("site_type") or site_type,
             "site_profiles": self.site_profiles,
@@ -6409,7 +6459,17 @@ class RuleEngine:
         fisheye_count = count_devices(lambda d: d.get("type") == "security.camera.fisheye")
         dome_count = count_devices(lambda d: d.get("type") == "security.camera.dome")
         bullet_count = count_devices(bullet_predicate)
-        items = [
+        if self._is_generic_mode():
+            items = [
+                ("cameras", "摄像头", count_devices(lambda d: str(d.get("type", "")).startswith("security.camera")), 0, "observed"),
+                ("aps", "无线AP设备", ap_count, 0, "observed"),
+                ("cabinets", "机柜设备", count_devices(lambda d: d.get("type") == "network.cabinet"), 0, "observed"),
+                ("power", "配电设备", count_devices(lambda d: str(d.get("type", "")).startswith("power.")), 0, "observed"),
+                ("lighting", "照明设备", count_devices(lambda d: str(d.get("type", "")).startswith("lighting.")), 0, "observed"),
+                ("cables", "线路", len(cables), 0, "observed"),
+            ]
+        else:
+            items = [
             ("warehouse_shell", "仓库主体", 1 if shell_area else 0, 1, "minimum"),
             ("cameras_fisheye", "鱼眼设备", fisheye_count, expected.get("fisheye", 0), "inventory"),
             ("coverage_fisheye", "鱼眼覆盖", count_devices(lambda d: d.get("type") == "security.camera.fisheye" and self._has_radius_coverage(d)), expected.get("fisheye", 0), "inventory"),
@@ -6431,13 +6491,17 @@ class RuleEngine:
         checklist: list[dict[str, Any]] = []
         for key, label, actual, expected_count, mode in items:
             expected_value = int(expected_count or 0)
-            required = expected_value if mode == "inventory" else max(expected_value, 1)
-            if actual < required:
-                status = "missing"
-            elif mode == "inventory" and actual > expected_value:
-                status = "extra_detected"
-            else:
+            if mode == "observed":
                 status = "ok"
+                required = 0
+            else:
+                required = expected_value if mode == "inventory" else max(expected_value, 1)
+                if actual < required:
+                    status = "missing"
+                elif mode == "inventory" and actual > expected_value:
+                    status = "extra_detected"
+                else:
+                    status = "ok"
             checklist.append(
                 {
                     "key": key,
@@ -8243,10 +8307,12 @@ class RuleEngine:
                 }
             ]
             office_model = {"floors": floors, "objects": []}
-            self._apply_generic_gatehouse_confirmed_floor_contract(floors)
+            if not self._is_generic_mode():
+                self._apply_generic_gatehouse_confirmed_floor_contract(floors)
             office_model["objects"] = self._extract_office_objects(entities, office_model)
-            office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
-            office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
+            if not self._is_generic_mode():
+                office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
+                office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
             return office_model
 
         has_explicit_mezzanine_title = bool(level2_title_seeds)
@@ -8304,11 +8370,13 @@ class RuleEngine:
             },
         ]
         office_model = {"floors": floors, "objects": []}
-        self._apply_generic_gatehouse_confirmed_floor_contract(floors)
+        if not self._is_generic_mode():
+            self._apply_generic_gatehouse_confirmed_floor_contract(floors)
         office_model["objects"] = self._extract_office_objects(entities, office_model)
-        office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
-        office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
-        office_model["objects"].extend(self._infer_conveyor_dws_objects(entities))
+        if not self._is_generic_mode():
+            office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
+            office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
+            office_model["objects"].extend(self._infer_conveyor_dws_objects(entities))
         return office_model
 
     def _infer_gatehouse_office_model(self, entities: list[dict[str, Any]]) -> dict[str, Any]:

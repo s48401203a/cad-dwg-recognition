@@ -1,7 +1,8 @@
-import { api } from "./api.js?v=52";
+import { api } from "./api.js?v=53";
 import { Logger } from "./logger.js";
-import { ProjectManager } from "./projectManager.js?v=4";
-import { SceneBuilder } from "./renderer/SceneBuilder.js?v=82";
+import { ProjectManager } from "./projectManager.js?v=6";
+import { SceneBuilder } from "./renderer/SceneBuilder.js?v=89";
+import { PlacementStudio } from "./placementStudio.js?v=15";
 
 const LAYER_ORDER_STORAGE_KEY = "cad-layer-card-order-v1";
 const LAYER_VISIBILITY_STORAGE_KEY = "cad-layer-card-visibility-v1";
@@ -45,7 +46,8 @@ const state = {
   project: null,
   projectSource: "auto",
   semantic: null,
-  siteProfiles: ["express"],
+  siteProfiles: ["generic"],
+  siteProfilesExplicit: false,
   siteProfileResolve: null,
   progressHideTimer: null,
   parsePromptTimer: null,
@@ -59,6 +61,8 @@ const state = {
   framePanelHidden: true,
   layerControlsTouched: false,
   performanceProfileKey: null,
+  loadGeneration: 0,
+  frameViewFiltersByProject: {},
 };
 
 const dom = {
@@ -73,6 +77,7 @@ const dom = {
   openSourceFileButton: document.getElementById("openSourceFileButton"),
   siteProfileSummary: document.getElementById("siteProfileSummary"),
   siteProfileModal: document.getElementById("siteProfileModal"),
+  siteProfileGeneric: document.getElementById("siteProfileGeneric"),
   siteProfileExpress: document.getElementById("siteProfileExpress"),
   siteProfileSupplyChain: document.getElementById("siteProfileSupplyChain"),
   confirmSiteProfileButton: document.getElementById("confirmSiteProfileButton"),
@@ -140,6 +145,16 @@ logger.onLine((line) => syncProgressFromLog(line));
 const scene = new SceneBuilder(dom.scene, dom.canvasWrap);
 scene.onSelect = (entity, kind) => renderInspector(entity, kind);
 
+const placement = new PlacementStudio({
+  api,
+  scene,
+  logger,
+  getProject: () => state.project,
+  applySemantic: (semantic, options = {}) => applySemantic(semantic, options),
+  onStatus: () => {},
+});
+placement.attach();
+
 const reverseValidationMode = isReverseValidationMode();
 const initialProjectTarget = getInitialProjectTarget();
 const projectManager = new ProjectManager({
@@ -190,16 +205,16 @@ function initializeLayerVisibilityFromInputs() {
 }
 
 function bindEvents() {
-  dom.uploadButton.addEventListener("click", async () => {
-    if (reverseValidationMode && !state.project) {
-      const selected = await ensureSiteProfilesSelected({ forceModal: true });
-      if (selected) dom.fileInput.click();
-      return;
+  dom.uploadButton.addEventListener("click", () => {
+    ensureDefaultSiteProfiles();
+    dom.fileInput.click();
+  });
+  dom.siteProfileSummary?.addEventListener("click", () => openSiteProfileModal());
+  dom.siteProfileSummary?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openSiteProfileModal();
     }
-    const project = await ensureWritableProjectSelected();
-    if (!project) return;
-    const selected = await ensureSiteProfilesSelected({ forceModal: true });
-    if (selected) dom.fileInput.click();
   });
   dom.fileInput.addEventListener("change", () => uploadFiles([...dom.fileInput.files]));
   dom.projectButton.addEventListener("click", async () => {
@@ -729,17 +744,71 @@ async function refreshProjects({ autoLoadLatest = false, preferredProjectId = nu
   }
 }
 
+function snapshotLayerVisibility() {
+  const visibility = {};
+  document.querySelectorAll("[data-layer]").forEach((input) => {
+    visibility[input.dataset.layer] = Boolean(input.checked);
+  });
+  return visibility;
+}
+
+function restoreLayerVisibility(visibility) {
+  if (!visibility || typeof visibility !== "object") return;
+  document.querySelectorAll("[data-layer]").forEach((input) => {
+    const key = input.dataset.layer;
+    if (!Object.prototype.hasOwnProperty.call(visibility, key)) return;
+    input.checked = Boolean(visibility[key]);
+    scene.setLayerVisibility(key, input.checked);
+  });
+  syncLayerCardControls();
+}
+
+function beginProjectSession(project) {
+  if (state.project?.id && state.frameViewFilters && Object.keys(state.frameViewFilters).length) {
+    state.frameViewFiltersByProject[state.project.id] = { ...state.frameViewFilters };
+  }
+  state.loadGeneration += 1;
+  state.uploads = [];
+  state.semantic = null;
+  state.frameViewFilters = {};
+  placement.reset();
+  scene.resetGroups();
+  scene.semantic = null;
+  scene.mapper = null;
+  if (dom.inspector) {
+    dom.inspector.className = "inspector-empty";
+    dom.inspector.textContent = "点击场景中的设备、区域或线路查看属性。";
+  }
+  if (dom.reviewList) dom.reviewList.innerHTML = `<div class="inspector-empty">暂无待审核条目。</div>`;
+  if (dom.drawingList) dom.drawingList.innerHTML = "";
+  projectManager.setActive(project?.id);
+  return state.loadGeneration;
+}
+
 async function loadProject(project, { auto = false, drawingId = null } = {}) {
+  const layerSnapshot = snapshotLayerVisibility();
+  const generation = beginProjectSession(project);
   setProject(project, auto ? "auto" : "manual");
   try {
+    const studio = await placement.ensureForProject(project);
+    if (generation !== state.loadGeneration) return;
+    if (studio) {
+      const refreshed = await api.getProject(project.id);
+      if (generation !== state.loadGeneration) return;
+      setProject(refreshed, auto ? "auto" : "manual");
+      project = refreshed;
+    }
     const exported = await api.exportProject(project.id, { drawing_id: drawingId || project.current_drawing_id });
+    if (generation !== state.loadGeneration) return;
     const currentDrawingId = drawingId || exported.current_drawing_id || exported.project?.current_drawing_id;
     const semantic = exported.schema_version
       ? exported
       : (exported.drawings || []).find((drawing) => drawing.project?.drawing_id === currentDrawingId) || exported.drawings?.[0];
-    if (semantic) applySemantic(semantic, { updateProgress: false });
+    if (semantic) applySemantic(semantic, { updateProgress: false, preserveLayers: true });
+    restoreLayerVisibility(layerSnapshot);
     logger.add("SUCCESS", `${auto ? "已自动加载最近项目" : "已加载项目"} ${project.name}`);
   } catch (error) {
+    if (generation !== state.loadGeneration) return;
     logger.add("ERROR", `项目加载失败: ${error.message}`);
   }
 }
@@ -761,10 +830,7 @@ function applyProjectData(exported, options = {}) {
 async function uploadFiles(files) {
   if (!files.length) return;
   hideUploadParsePrompt();
-  const project = await ensureWritableProjectSelected(defaultProjectNameForFiles(files));
-  if (!project) return;
-  const selected = await ensureSiteProfilesSelected();
-  if (!selected) return;
+  ensureDefaultSiteProfiles();
   dom.uploadButton.disabled = true;
   resetParseProgress();
   setParseProgress("upload", `准备上传 ${files.length} 个文件`);
@@ -777,9 +843,10 @@ async function uploadFiles(files) {
       logger.add("SUCCESS", result.message || `${file.name} 已上传`);
     }
     renderDrawingList();
-    dom.parseButton.disabled = state.uploads.length === 0 || isCurrentProjectArchived();
-    completeParseProgress("上传完成，等待解析");
-    showUploadParsePrompt();
+    dom.parseButton.disabled = state.uploads.length === 0;
+    setParseProgress("upload", "上传完成，正在自动解析");
+    logger.add("INFO", "上传完成，开始自动解析并生成 3D");
+    await parseUploads();
   } catch (error) {
     failParseProgress(`上传失败: ${error.message}`);
     logger.add("ERROR", `上传失败: ${error.message}`);
@@ -792,15 +859,16 @@ async function uploadFiles(files) {
 async function parseUploads() {
   if (!state.uploads.length) return;
   hideUploadParsePrompt();
-  if (isCurrentProjectArchived()) {
-    logger.add("ERROR", "当前项目已归档，只能只读查看；请恢复或新建项目后再解析");
-    return;
-  }
   const selected = await ensureSiteProfilesSelected();
   if (!selected) return;
   let batchProject = await ensureWritableProjectSelected(defaultProjectName());
   if (!batchProject) return;
-  logger.add("INFO", `本批 ${state.uploads.length} 张图纸将写入同一项目: ${batchProject.name}`);
+  const siteProfiles = currentSiteProfiles();
+  if (isCurrentProjectArchived()) {
+    logger.add("ERROR", "当前项目已归档，只能只读查看；请恢复或新建项目后再解析");
+    return;
+  }
+  logger.add("INFO", `本批 ${state.uploads.length} 张图纸将写入同一项目: ${batchProject.name}（${siteProfiles.map(profileDisplayName).join(" + ")}）`);
 
   dom.parseButton.disabled = true;
   resetParseProgress();
@@ -812,7 +880,7 @@ async function parseUploads() {
         file_id: upload.file_id,
         project_id: batchProject.id,
         save_dir: batchProject.save_dir,
-        site_profiles: state.siteProfiles,
+        site_profiles: siteProfiles,
       });
       applySemantic(semantic, { updateProgress: true });
       batchProject = state.project || batchProject;
@@ -860,7 +928,7 @@ function applySemantic(semantic, options = {}) {
   }
   applyScenePerformanceProfile(semantic);
   initializeFrameViewFilters(semantic);
-  loadSemanticForFrameViews({ preserveView: false });
+  loadSemanticForFrameViews({ preserveView: Boolean(options.preserveView) });
   dom.dropHint.classList.add("hidden");
   renderFrameDetection(semantic);
   renderStats(semantic);
@@ -873,10 +941,10 @@ function applySemantic(semantic, options = {}) {
         save_dir: semantic.project.save_dir,
         status: semantic.project.status || "active",
         site_profiles: semantic.project.site_profiles || semantic.site_profiles || state.siteProfiles,
-        drawings: semantic.project.drawings || state.project?.drawings || [],
+        drawings: semantic.project.drawings || [],
         current_drawing_id: semantic.project.current_drawing_id || semantic.project.drawing_id,
       },
-      "parsed",
+      state.projectSource === "auto" ? "auto" : "parsed",
     );
   }
   syncProjectActionButtons();
@@ -884,14 +952,17 @@ function applySemantic(semantic, options = {}) {
 
 function initializeFrameViewFilters(semantic) {
   const frames = semanticFrames(semantic);
-  const savedFilters = readStorageObject(FRAME_VIEW_FILTER_STORAGE_KEY) || {};
+  const projectId = semantic?.project?.id || state.project?.id || "";
+  const memory = projectId ? state.frameViewFiltersByProject[projectId] : null;
   const filters = {};
   frames.forEach((frame) => {
     const key = frameViewKey(frame);
-    if (key) filters[key] = Object.prototype.hasOwnProperty.call(savedFilters, key) ? Boolean(savedFilters[key]) : true;
+    if (!key) return;
+    filters[key] = memory && Object.prototype.hasOwnProperty.call(memory, key) ? Boolean(memory[key]) : true;
   });
-  if (!Object.keys(filters).length) filters.main_plan = Object.prototype.hasOwnProperty.call(savedFilters, "main_plan") ? Boolean(savedFilters.main_plan) : true;
+  if (!Object.keys(filters).length) filters.main_plan = memory?.main_plan !== false;
   state.frameViewFilters = filters;
+  if (projectId) state.frameViewFiltersByProject[projectId] = { ...filters };
 }
 
 function hasRenderableCoverage(device) {
@@ -1010,6 +1081,7 @@ function frameViewKey(frame) {
 function setProject(project, source = "manual") {
   state.project = project;
   state.projectSource = source;
+  projectManager.setActive(project?.id);
   dom.projectTitle.textContent = project.name || "CAD 弱电图纸 3D 预览";
   if (Array.isArray(project.site_profiles) && project.site_profiles.length) {
     state.siteProfiles = project.site_profiles;
@@ -1110,7 +1182,7 @@ async function reparseCurrentProject(event) {
   const drawingId = state.semantic?.project?.drawing_id || state.project?.current_drawing_id || null;
   const payload = {
     drawing_id: drawingId,
-    site_profiles: state.siteProfiles,
+    site_profiles: currentSiteProfiles(),
     force_main_frame: bbox ? { kind: "manual", bbox } : false,
   };
   dom.reparseButton.disabled = true;
@@ -1305,15 +1377,29 @@ function handleProjectMutation(project, action) {
   syncProjectActionButtons();
 }
 
+function ensureDefaultSiteProfiles() {
+  if (Array.isArray(state.siteProfiles) && state.siteProfiles.length) return state.siteProfiles;
+  state.siteProfiles = ["generic"];
+  renderSiteProfileSummary();
+  return state.siteProfiles;
+}
+
+function currentSiteProfiles() {
+  return [...ensureDefaultSiteProfiles()];
+}
+
 async function ensureSiteProfilesSelected({ forceModal = false } = {}) {
+  ensureDefaultSiteProfiles();
   if (!forceModal && state.siteProfiles.length) return true;
   return openSiteProfileModal();
 }
 
 function openSiteProfileModal() {
   if (!dom.siteProfileModal) return Promise.resolve(true);
-  dom.siteProfileExpress.checked = state.siteProfiles.includes("express");
-  dom.siteProfileSupplyChain.checked = state.siteProfiles.includes("supply_chain");
+  const selected = ensureDefaultSiteProfiles();
+  if (dom.siteProfileGeneric) dom.siteProfileGeneric.checked = selected.includes("generic");
+  if (dom.siteProfileExpress) dom.siteProfileExpress.checked = selected.includes("express");
+  if (dom.siteProfileSupplyChain) dom.siteProfileSupplyChain.checked = selected.includes("supply_chain");
   dom.siteProfileModal.classList.add("open");
   return new Promise((resolve) => {
     state.siteProfileResolve = resolve;
@@ -1322,6 +1408,7 @@ function openSiteProfileModal() {
 
 function confirmSiteProfiles() {
   const selected = [];
+  if (dom.siteProfileGeneric?.checked) selected.push("generic");
   if (dom.siteProfileExpress?.checked) selected.push("express");
   if (dom.siteProfileSupplyChain?.checked) selected.push("supply_chain");
   if (!selected.length) {
@@ -1329,6 +1416,7 @@ function confirmSiteProfiles() {
     return;
   }
   state.siteProfiles = selected;
+  state.siteProfilesExplicit = true;
   renderSiteProfileSummary();
   closeSiteProfileModal(true);
 }
@@ -1354,7 +1442,7 @@ async function createReverseValidationProject(defaultName = defaultProjectName()
   const name = buildReverseValidationProjectName(defaultName);
   try {
     logger.add("INFO", `正在创建独立验证项目: ${name}`);
-    const project = await api.createProject({ name, save_dir: null, site_profiles: state.siteProfiles });
+    const project = await api.createProject({ name, save_dir: null, site_profiles: currentSiteProfiles() });
     setProject(project, "validation");
     await projectManager.refresh(loadProject);
     logger.add("SUCCESS", `已创建独立验证项目 ${project.name}`);
@@ -1380,6 +1468,7 @@ function buildReverseValidationProjectName(defaultName = defaultProjectName()) {
 
 function profileDisplayName(profile) {
   return {
+    generic: "通用",
     express: "快运",
     supply_chain: "供应链",
   }[profile] || profile;
@@ -1551,19 +1640,49 @@ async function ensureWritableProjectSelected(defaultName = defaultProjectName())
   if (state.project && state.projectSource !== "auto" && !isCurrentProjectArchived()) {
     return state.project;
   }
+  if (
+    initialProjectTarget?.scoped
+    && state.project?.id === initialProjectTarget.projectId
+    && !isCurrentProjectArchived()
+  ) {
+    return state.project;
+  }
   if (reverseValidationMode && !initialProjectTarget) {
     return createReverseValidationProject(defaultName);
   }
   if (isCurrentProjectArchived()) {
-    logger.add("WARNING", "当前项目已归档，请选择活动项目或新建项目后再上传");
+    logger.add("WARNING", "当前项目已归档，将新建项目后再解析");
   } else if (state.projectSource === "auto") {
-    logger.add("INFO", "上传前请确认保存位置，避免把新图纸写入自动加载的历史项目");
+    logger.add("INFO", "当前是自动加载的历史项目，将新建项目以免写入历史图纸");
   } else {
-    logger.add("INFO", "请先新建或选择一个项目，随后再上传 DWG/DXF 图纸");
+    logger.add("INFO", "未选择项目，将按图纸名自动创建项目");
   }
-  const project = await projectManager.open(defaultName);
-  if (project) setProject(project, "manual");
-  return project;
+  return createUploadTargetProject(defaultName);
+}
+
+function siteProfilesForNewProject() {
+  if (state.siteProfilesExplicit && state.siteProfiles.length) {
+    return [...state.siteProfiles];
+  }
+  state.siteProfiles = ["generic"];
+  renderSiteProfileSummary();
+  return ["generic"];
+}
+
+async function createUploadTargetProject(defaultName = defaultProjectName()) {
+  const name = String(defaultName || "未命名弱电项目").replace(/\s+/g, " ").trim() || "未命名弱电项目";
+  const siteProfiles = siteProfilesForNewProject();
+  try {
+    logger.add("INFO", `正在创建项目: ${name}`);
+    const project = await api.createProject({ name, save_dir: null, site_profiles: siteProfiles });
+    setProject(project, "created");
+    await projectManager.refresh(loadProject);
+    logger.add("SUCCESS", `已创建项目 ${project.name}`);
+    return project;
+  } catch (error) {
+    logger.add("ERROR", `项目创建失败: ${error.message}`);
+    return null;
+  }
 }
 
 function defaultProjectNameForFiles(files) {
@@ -1792,7 +1911,7 @@ function renderFrameSwitches(frames) {
     input.addEventListener("change", () => {
       state.frameViewFilters[key] = input.checked;
       label.classList.toggle("off", !input.checked);
-      localStorage.setItem(FRAME_VIEW_FILTER_STORAGE_KEY, JSON.stringify(state.frameViewFilters));
+      if (state.project?.id) state.frameViewFiltersByProject[state.project.id] = { ...state.frameViewFilters };
       loadSemanticForFrameViews({ preserveView: true });
       renderFrameSwitches(frames);
     });
@@ -2098,6 +2217,20 @@ function renderInspector(entity, kind) {
   dom.inspector.innerHTML = rows
     .map(([label, value]) => `<div class="inspector-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`)
     .join("");
+  if (attrs.placement && entity.id) {
+    const height = Number(attrs.install_height_m || elevation || 0);
+    const editor = document.createElement("div");
+    editor.className = "inspector-row";
+    editor.innerHTML = `<span>手调高度 m</span><input id="placementHeightInput" type="number" min="0.2" max="16" step="0.1" value="${height}" />`;
+    dom.inspector.appendChild(editor);
+    const tip = document.createElement("div");
+    tip.className = "inspector-row";
+    tip.innerHTML = "<span>位置</span><span>在物体上按住拖动</span>";
+    dom.inspector.appendChild(tip);
+    editor.querySelector("input")?.addEventListener("change", (event) => {
+      placement.updateSelectedHeight(entity.id, event.target.value);
+    });
+  }
 }
 
 function firstValue(...values) {

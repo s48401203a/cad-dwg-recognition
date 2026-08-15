@@ -19,6 +19,11 @@ const COLORS = {
   glass: 0x172530,
   metal: 0x9aa6a8,
   generic: 0xffaa00,
+  panel: 0x3a3d42,
+  panelDark: 0x16181b,
+  panelAccent: 0xeab308,
+  lighting: 0xfbbf24,
+  lightingWarm: 0xffe08a,
 };
 
 const CABINET_DIMENSIONS = {
@@ -29,6 +34,7 @@ const CABINET_DIMENSIONS = {
   ups: { width: 0.68, depth: 0.54, height: 1.18 },
   battery: { width: 0.74, depth: 0.56, height: 1.04 },
 };
+const PANEL_DIMENSIONS = { width: 0.52, depth: 0.24, height: 1.12 };
 const DEFAULT_DEVICE_MODEL_SCALE = 2.0;
 const MIN_DEVICE_MODEL_SCALE = 1.0;
 const MAX_DEVICE_MODEL_SCALE = 3.0;
@@ -49,7 +55,7 @@ const AP_WIFI_RIPPLE_SPEED = 0.18;
 
 function material(color, options = {}) {
   const opacity = options.opacity ?? 1;
-  return new THREE.MeshStandardMaterial({
+  const params = {
     color,
     roughness: options.roughness ?? 0.58,
     metalness: options.metalness ?? 0.04,
@@ -57,7 +63,12 @@ function material(color, options = {}) {
     opacity,
     side: THREE.DoubleSide,
     depthWrite: opacity >= 0.95,
-  });
+  };
+  if (options.emissive != null) {
+    params.emissive = options.emissive;
+    params.emissiveIntensity = options.emissiveIntensity ?? 0.55;
+  }
+  return new THREE.MeshStandardMaterial(params);
 }
 
 function addSmallLabelPlate(group, y, width, depth, color) {
@@ -149,6 +160,8 @@ export class DeviceFactory {
     if (type === "security.camera.dome") return this._makeDome(device, scale);
     if (type.startsWith("security.camera")) return this._makeBullet(device, scale);
     if (type === "network.cabinet") return this._makeCabinet(device, visualScale);
+    if (type === "power.distribution" || type === "power.panel") return this._makePowerDistribution(device, visualScale);
+    if (type === "lighting.fixture") return this._makeLightingFixture(device, scale);
     return this._makeGeneric(device, scale);
   }
 
@@ -488,6 +501,101 @@ export class DeviceFactory {
     return group;
   }
 
+  _makePowerDistribution(device, visualScale = DEFAULT_DEVICE_MODEL_SCALE) {
+    const attrs = device.attributes || {};
+    const cabinetScale = Math.max(1, this._visualScale(visualScale) * 0.85);
+    const dimensions = {
+      width: PANEL_DIMENSIONS.width * cabinetScale,
+      depth: PANEL_DIMENSIONS.depth * cabinetScale,
+      height: PANEL_DIMENSIONS.height * cabinetScale,
+    };
+    const group = new THREE.Group();
+    const floorElevation = Number(attrs.floor_elevation_m || 0);
+    const topEdge = Number(attrs.top_edge_height_m || 0);
+    const y = attrs.mount === "wall" && topEdge > 0
+      ? floorElevation + Math.max(topEdge - dimensions.height / 2, dimensions.height / 2)
+      : floorElevation + dimensions.height / 2;
+
+    const shell = new THREE.Mesh(
+      new THREE.BoxGeometry(dimensions.width, dimensions.height, dimensions.depth),
+      material(COLORS.panel, { roughness: 0.52, metalness: 0.22 }),
+    );
+    shell.position.y = y;
+    group.add(shell);
+
+    const door = new THREE.Mesh(
+      new THREE.BoxGeometry(dimensions.width * 0.86, dimensions.height * 0.88, 0.016),
+      material(COLORS.panelDark, { roughness: 0.46, metalness: 0.16 }),
+    );
+    door.position.set(0, y, -dimensions.depth / 2 - 0.01);
+    group.add(door);
+
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(dimensions.width * 0.86, 0.04, 0.018),
+      material(COLORS.panelAccent, { roughness: 0.4, metalness: 0.08 }),
+    );
+    stripe.position.set(0, y + dimensions.height * 0.32, -dimensions.depth / 2 - 0.02);
+    group.add(stripe);
+
+    const breakerMaterial = material(0x2a2d30, { roughness: 0.34, metalness: 0.2 });
+    for (let index = 0; index < 4; index += 1) {
+      const breaker = new THREE.Mesh(
+        new THREE.BoxGeometry(dimensions.width * 0.56, 0.05, 0.02),
+        breakerMaterial,
+      );
+      breaker.position.set(0, y + dimensions.height * (0.14 - index * 0.12), -dimensions.depth / 2 - 0.022);
+      group.add(breaker);
+    }
+
+    const handle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.028, dimensions.height * 0.16, 0.022),
+      material(COLORS.metal, { roughness: 0.4, metalness: 0.28 }),
+    );
+    handle.position.set(dimensions.width * 0.32, y + dimensions.height * 0.02, -dimensions.depth / 2 - 0.024);
+    group.add(handle);
+    return group;
+  }
+
+  _makeLightingFixture(device, scale) {
+    const group = new THREE.Group();
+    const height = this.installHeightFor(device);
+
+    const canopy = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.14 * scale, 0.16 * scale, 0.035 * scale, 24),
+      material(COLORS.metal, { roughness: 0.42, metalness: 0.22 }),
+    );
+    canopy.position.y = height + 0.028 * scale;
+    group.add(canopy);
+
+    const housing = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.22 * scale, 0.20 * scale, 0.055 * scale, 28),
+      material(0xc9b89a, { roughness: 0.48, metalness: 0.06 }),
+    );
+    housing.position.y = height - 0.012 * scale;
+    group.add(housing);
+
+    const disc = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.19 * scale, 0.19 * scale, 0.016 * scale, 28),
+      material(COLORS.lightingWarm, {
+        roughness: 0.22,
+        metalness: 0.02,
+        emissive: COLORS.lighting,
+        emissiveIntensity: 0.62,
+      }),
+    );
+    disc.position.y = height - 0.042 * scale;
+    group.add(disc);
+
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.20 * scale, 0.014 * scale, 10, 28),
+      material(COLORS.lighting, { roughness: 0.36, metalness: 0.04 }),
+    );
+    ring.rotation.x = Math.PI / 2;
+    ring.position.y = height - 0.038 * scale;
+    group.add(ring);
+    return group;
+  }
+
   _makeGeneric(device, scale) {
     const height = this.installHeightFor(device);
     const group = new THREE.Group();
@@ -516,6 +624,13 @@ export class DeviceFactory {
       if (attrs.mount === "wall" && attrs.top_edge_height_m) return floorElevation + Number(attrs.top_edge_height_m) + 0.28;
       return floorElevation + dimensions.height + 0.28;
     }
+    if (device.type === "power.distribution" || device.type === "power.panel") {
+      const attrs = device.attributes || {};
+      const cabinetScale = Math.max(1, this._visualScale(modelScaleMultiplier) * 0.85);
+      const floorElevation = Number(attrs.floor_elevation_m || 0);
+      if (attrs.mount === "wall" && attrs.top_edge_height_m) return floorElevation + Number(attrs.top_edge_height_m) + 0.28;
+      return floorElevation + PANEL_DIMENSIONS.height * cabinetScale + 0.28;
+    }
     return this.installHeightFor(device) + 0.36;
   }
 
@@ -525,6 +640,7 @@ export class DeviceFactory {
     if (Number.isFinite(Number(attrs.install_height_m))) return floorElevation + Number(attrs.install_height_m);
     const type = device.type || "";
     if (type === "network.ap") return floorElevation + (attrs.zone === "office" ? 3.2 : 6.0);
+    if (type === "lighting.fixture") return floorElevation + (attrs.zone === "office" ? 3.0 : 4.5);
     if (type === "security.camera.fisheye") return floorElevation + 5.0;
     if (type === "security.camera.dome") return floorElevation + 3.0;
     if (type === "security.camera.rear") return floorElevation + 2.8;
@@ -681,7 +797,14 @@ export class DeviceFactory {
     shape.lineTo(0, 0);
 
     const group = new THREE.Group();
-    group.userData = { selectable: true, entity: device, kind: "coverage" };
+    group.userData = {
+      selectable: true,
+      entity: device,
+      kind: "coverage",
+      anchoredAtDevice: true,
+      baseLength: drawLength,
+      baseWorld: mapper.toVector3(pos2d, 0),
+    };
     group.position.copy(mapper.toVector3(pos2d, installY));
     group.rotation.y = yawFromCadAngle(directionDeg);
 
@@ -716,7 +839,14 @@ export class DeviceFactory {
     const drawLength = Math.max(0.5, Number(length || 20));
     const beamRadius = Math.max(0.25, Math.tan(THREE.MathUtils.degToRad(coverageAngleDeg / 2)) * drawLength);
     const group = new THREE.Group();
-    group.userData = { selectable: true, entity: device, kind: "coverage" };
+    group.userData = {
+      selectable: true,
+      entity: device,
+      kind: "coverage",
+      anchoredAtDevice: true,
+      baseLength: drawLength,
+      baseWorld: mapper.toVector3(pos2d, 0),
+    };
     group.position.copy(mapper.toVector3(pos2d, installY));
     group.rotation.y = yawFromCadAngle(directionDeg);
 
@@ -754,7 +884,13 @@ export class DeviceFactory {
     const installY = Math.max(this.installHeightFor(device), groundY + 0.35);
     const height = installY - groundY;
     const group = new THREE.Group();
-    group.userData = { selectable: true, entity: device, kind: "coverage" };
+    group.userData = {
+      selectable: true,
+      entity: device,
+      kind: "coverage",
+      baseRadius: radius,
+      baseWorld: mapper.toVector3(pos2d, 0),
+    };
     const beamOpacity = Math.max(0.22, opacity);
 
     const beam = new THREE.Mesh(

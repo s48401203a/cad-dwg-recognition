@@ -3,6 +3,7 @@
 ## 必须确认
 
 - GitHub 仓库必须选择 `Private`。
+- 客户图纸永不入库：任何客户 DWG/DXF、`semantic.json`、客户项目目录都不得进入 Git。
 - 提交列表中不能出现 `.dwg`、`.dxf`、`semantic.json`。
 - 提交列表中不能出现 `backend/uploads/`、`backend/projects/`、`backend/logs/`、`backups/`。
 - 提交列表中不能出现真实项目名称、客户名称、本机绝对路径、设备真实编号截图。

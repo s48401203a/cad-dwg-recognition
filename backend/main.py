@@ -1,4 +1,6 @@
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -7,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from api import parse, projects, replay, upload, visual_audit
 from log_hub import broadcaster
+from log_retention import enforce_log_budget, log_retention_loop
 from parser.dwg_converter import DwgConverter, find_oda_file_converter
 from storage import LOG_DIR, PROJECTS_DIR, UPLOAD_DIR
 
@@ -17,7 +20,22 @@ EXPORTS_DIR = Path(os.environ["CAD_EXPORTS_DIR"]).expanduser() if os.environ.get
 for directory in (UPLOAD_DIR, LOG_DIR, PROJECTS_DIR, EXPORTS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="CAD 3D Preview Tool")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    enforce_log_budget()
+    retention_task = asyncio.create_task(log_retention_loop())
+    try:
+        yield
+    finally:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="CAD 3D Preview Tool", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

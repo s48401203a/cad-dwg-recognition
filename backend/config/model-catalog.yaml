@@ -1,10 +1,10 @@
 version: "1.1"
+# 说明：库墙高 / 屋脊高 / 月台高度属"可能针对特定场地"的数值，已移出公开配置，
+# 改由本机私有配置提供（site-adaptations.yaml 的 site_values）。
+# 未配置时摆放试验场使用代码里明确标注的**通用占位值**（仅用于生成试验场地壳）。
 site_defaults:
   length_m: 80
   width_m: 50
-  wall_height_m: 10.5
-  roof_peak_height_m: 12.6
-  dock_height_m: 1.2
 groups:
   - id: network
     label: 网络

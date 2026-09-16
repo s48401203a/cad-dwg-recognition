@@ -464,3 +464,23 @@ def test_corrupt_project_meta_reports_error_and_quarantines(client, clean_runtim
     assert "损坏" in response.json()["detail"]
     quarantined = list(meta_path.parent.glob("meta.json.corrupt-*"))
     assert quarantined, "损坏文件必须被隔离保留，而不是静默覆盖"
+
+
+def test_same_upload_can_be_parsed_twice(client, clean_runtime, tmp_path: Path):
+    """回归：同一 file_id 可以被再次解析。
+
+    上传记录在首次解析后会被改写到项目内的副本路径（`materialize_upload_for_project`），
+    此前二次解析会因为"只允许上传目录"而被 400 拒绝。
+    """
+    dxf = write_dxf(tmp_path / "twice.dxf", build_basic_fixture())
+    upload = _upload_dxf(client, dxf)
+
+    first = client.post("/api/parse", json={"file_id": upload["file_id"], "site_profiles": ["generic"]})
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        "/api/parse",
+        json={"file_id": upload["file_id"], "project_id": first.json()["project"]["id"], "site_profiles": ["generic"]},
+    )
+    assert second.status_code == 200, second.text
+    assert second.json()["stats"]["devices"] >= 1

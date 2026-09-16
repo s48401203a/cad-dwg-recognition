@@ -223,3 +223,95 @@ def test_unconfigured_quantity_patterns_do_not_match():
     assert engine._extra_quantity_patterns("ap") == []
     entities = [{"entity_type": "TEXT", "text": f"场地AP（编号：{DEMO_PREFIX}-AP-01~12）"}]
     assert engine._expected_site_ap_max_number(entities) is None
+
+
+# --------------------------------------------------------------- A1 场地数值隔离
+
+
+def test_unconfigured_site_values_are_absent():
+    """未配置时：场地数值一项都读不到（不是回落到内置默认）。"""
+    engine = RuleEngine(site_profiles=["generic"])
+    for key in (
+        "dock_height_m",
+        "warehouse_wall_height_m",
+        "warehouse_roof_peak_height_m",
+        "power_equipment_min_center_spacing_mm",
+        "power_equipment_service_clearance_m",
+        "tray_min_segment_mm",
+        "tray_label_tolerance_mm",
+    ):
+        assert engine._site_value(key) is None, f"{key} 不应有内置默认值"
+    assert engine._power_clearance_attrs("service_channel_to_ups_m") == {}
+    assert engine._warehouse_shell_attrs() == {}
+    assert engine._dock_value_attrs() == {}
+
+
+def test_unconfigured_site_values_do_not_write_height_fields():
+    """未配置时：语义结果不写入场地尺寸字段。"""
+    engine = RuleEngine(site_profiles=["express"])
+    site = engine._site_metadata([])
+    for key in ("dock_height_m", "warehouse_floor_height_m", "warehouse_wall_height_m", "warehouse_roof_peak_height_m"):
+        assert key not in site, f"未配置时不应写入 {key}"
+
+
+def test_unconfigured_height_inference_is_skipped():
+    """未配置目标高度时：不做高度挑选（只读标注、不写入结果）。"""
+    engine = RuleEngine(site_profiles=["express"])
+    entities = [{"entity_type": "TEXT", "text": "9.500"}, {"entity_type": "TEXT", "text": "11.000"}]
+    assert engine._infer_warehouse_heights(entities) == {}
+
+
+def test_configured_site_values_are_applied(private_rules_dir: Path):
+    """配置后：场地数值生效，且高度推断按配置目标进行。"""
+    _write_adaptations(
+        private_rules_dir,
+        """
+        version: "1"
+        site_values:
+          dock_height_m: 1.1
+          warehouse_wall_height_m: 9.0
+          warehouse_roof_peak_height_m: 10.0
+          power_equipment_service_clearance_m: 0.2
+          power_equipment_min_center_spacing_mm: 1200
+        vehicle_legend_counts:
+          box_4_2: 11
+        """,
+    )
+    engine = RuleEngine(site_profiles=["express"])
+    assert engine._site_value("dock_height_m") == 1.1
+    assert engine._power_clearance_attrs("service_channel_to_ups_m")["maintenance_clearance_m"] == 0.2
+    site = engine._site_metadata([])
+    assert site["dock_height_m"] == 1.1
+    assert site["warehouse_wall_height_m"] == 9.0
+
+    heights = engine._infer_warehouse_heights(
+        [{"entity_type": "TEXT", "text": "9.000"}, {"entity_type": "TEXT", "text": "10.000"}]
+    )
+    assert heights.get("warehouse_wall_height_m") == 9.0
+    assert engine._vehicle_legend_weight("box_4_2") == 11.0
+    assert engine._vehicle_legend_weight("box_9_6") == 1.0, "未配置的车型按等权"
+
+
+def test_placement_placeholder_marks_source():
+    """摆放试验场：未配置时用明确标注的占位值，而不是从原场地值改名。"""
+    from placement import PLACEHOLDER_WALL_HEIGHT_M, default_semantic, load_catalog
+
+    catalog = load_catalog()
+    semantic = default_semantic({"id": "proj_placeholder", "name": "摆放试验场", "site_profiles": ["generic"]}, catalog)
+    source = (semantic.get("site") or {}).get("height_source") or {}
+    assert source.get("warehouse_wall_height_m") == "placeholder_default"
+    assert semantic["site"]["warehouse_wall_height_m"] == PLACEHOLDER_WALL_HEIGHT_M
+
+
+def test_public_configs_have_no_site_numbers():
+    """结构性断言：公开配置里不得出现场地数值。"""
+    import re
+    from pathlib import Path as _Path
+
+    for relative in ("backend/config/company_standards.yaml", "backend/config/model-catalog.yaml",
+                     "backend/config/profiles/express.yaml", "backend/config/profiles/generic.yaml"):
+        text = _Path(relative).read_text(encoding="utf-8")
+        for key in ("dock_height_m", "warehouse_wall_height_m", "warehouse_roof_peak_height_m",
+                    "camera_to_vehicle_tail_gap_m", "legend_count"):
+            for match in re.finditer(rf"^\s*{key}:\s*(\S+)\s*$", text, re.M):
+                raise AssertionError(f"{relative} 仍含场地数值：{key}: {match.group(1)}")

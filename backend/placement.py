@@ -30,6 +30,33 @@ CATALOG_PATH = Path(__file__).resolve().parent / "config" / "model-catalog.yaml"
 OVERRIDES_NAME = "model-overrides.json"
 SCHEMA_VERSION = "1.1.11"
 
+#: 摆放试验场的**通用占位值**：仅在没有任何场地数值配置时用于生成试验场地壳，
+#: 不代表任何真实场地取值。真实数值应由本机私有配置（site_values）提供。
+PLACEHOLDER_WALL_HEIGHT_M = 6.0
+PLACEHOLDER_ROOF_PEAK_HEIGHT_M = 7.0
+PLACEHOLDER_DOCK_HEIGHT_M = 1.2
+SITE_VALUE_KEYS = {
+    "wall_height_m": "warehouse_wall_height_m",
+    "roof_peak_height_m": "warehouse_roof_peak_height_m",
+    "dock_height_m": "dock_height_m",
+}
+
+
+def _site_number(defaults: dict, key: str, placeholder: float) -> tuple[float, str]:
+    """场地数值优先级：本机私有配置 > 调用方传入 > 通用占位值。
+
+    第二项是来源标记，便于前端与审计区分"真实配置"与"占位"。
+    """
+    from semantic.site_adaptations import load_site_adaptations
+
+    configured = load_site_adaptations().value(SITE_VALUE_KEYS.get(key, key))
+    if configured is not None:
+        return float(configured), "private_config"
+    raw = defaults.get(key)
+    if raw is not None:
+        return float(raw), "catalog"
+    return float(placeholder), "placeholder_default"
+
 #: override 实例允许的类型分类。
 INSTANCE_KINDS = {"device", "fixture", "cable", "office", "parking", "structure"}
 #: 线路端点数量下限/上限，防止畸形数据进入渲染层。
@@ -302,8 +329,25 @@ def _site_box_mm(catalog: dict[str, Any], overrides: dict[str, Any]) -> tuple[fl
     site = overrides.get("site") or {}
     length_m = float(site.get("length_m") or defaults.get("length_m") or 80)
     width_m = float(site.get("width_m") or defaults.get("width_m") or 50)
-    wall_h = float(site.get("wall_height_m") or defaults.get("wall_height_m") or 10.5)
+    wall_h, _source = _site_number({**defaults, **site}, "wall_height_m", PLACEHOLDER_WALL_HEIGHT_M)
     return length_m * 1000.0, width_m * 1000.0, wall_h
+
+
+def _placement_site_attrs(defaults: dict[str, Any]) -> dict[str, Any]:
+    dock, dock_source = _site_number(defaults, "dock_height_m", PLACEHOLDER_DOCK_HEIGHT_M)
+    wall, wall_source = _site_number(defaults, "wall_height_m", PLACEHOLDER_WALL_HEIGHT_M)
+    peak, peak_source = _site_number(defaults, "roof_peak_height_m", PLACEHOLDER_ROOF_PEAK_HEIGHT_M)
+    return {
+        "dock_height_m": dock,
+        "warehouse_floor_height_m": dock,
+        "warehouse_wall_height_m": wall,
+        "warehouse_roof_peak_height_m": peak,
+        "height_source": {
+            "dock_height_m": dock_source,
+            "warehouse_wall_height_m": wall_source,
+            "warehouse_roof_peak_height_m": peak_source,
+        },
+    }
 
 
 def default_semantic(meta: dict[str, Any], catalog: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -329,10 +373,7 @@ def default_semantic(meta: dict[str, Any], catalog: dict[str, Any] | None = None
         "site": {
             "site_type": "generic",
             "site_profiles": meta.get("site_profiles") or ["generic"],
-            "dock_height_m": float(defaults.get("dock_height_m") or 1.2),
-            "warehouse_floor_height_m": float(defaults.get("dock_height_m") or 1.2),
-            "warehouse_wall_height_m": float(defaults.get("wall_height_m") or 10.5),
-            "warehouse_roof_peak_height_m": float(defaults.get("roof_peak_height_m") or 12.6),
+            **_placement_site_attrs(defaults),
             "source": "placement_studio",
         },
         "stats": {},

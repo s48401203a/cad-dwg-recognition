@@ -152,14 +152,20 @@ async def parse_file(payload: ParseRequest) -> dict:
 
 
 def resolve_upload_path(record: dict[str, Any]) -> Path:
-    """从上传记录解析 DXF 路径，只允许落在上传目录内。"""
+    """从上传记录解析 DXF 路径。
+
+    允许的根目录是**服务端受管目录**：上传目录，以及项目存储目录
+    （`materialize_upload_for_project` 会把上传文件复制进项目目录并把索引指向副本）。
+    路径仍由服务端从索引解析，客户端无法通过 file_id 指定任意路径。
+    """
     value = record.get("dxf_path")
     if not value:
         raise HTTPException(status_code=400, detail="上传记录缺少 dxf_path")
-    from storage import UPLOAD_DIR
+    from storage import PROJECTS_ARCHIVE_DIR, PROJECTS_DIR, UPLOAD_DIR
 
+    roots = [UPLOAD_DIR, PROJECTS_DIR, PROJECTS_ARCHIVE_DIR]
     try:
-        path = resolve_within_roots(value, [UPLOAD_DIR], label="上传 DXF 文件")
+        path = resolve_within_roots(value, roots, label="上传 DXF 文件")
     except PathPolicyError as exc:
         raise HTTPException(status_code=400, detail=f"上传文件路径被拒绝：{exc}") from exc
     if not path.exists():

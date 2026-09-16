@@ -53,6 +53,11 @@ class SiteAdaptations:
     extra_layer_keywords: list[str] = field(default_factory=list)
     #: 追加的"数量注释"正则：键 -> 正则列表（未配置时为空）
     extra_quantity_patterns: dict[str, list[str]] = field(default_factory=dict)
+    #: 场地数值（月台高度、库墙高、设备间距等）。**未配置的键不存在**，
+    #: 调用方据此跳过对应推断，而不是回落到任何内置默认值。
+    site_values: dict[str, float] = field(default_factory=dict)
+    #: 车辆图例计数（用于按比例分配车型序列）。未配置时按等权处理。
+    vehicle_legend_counts: dict[str, float] = field(default_factory=dict)
     #: 配置来源（用于审计；不写入导出内容）
     source_path: str | None = None
 
@@ -69,7 +74,16 @@ class SiteAdaptations:
             or self.extra_rule_keywords
             or self.extra_layer_keywords
             or self.extra_quantity_patterns
+            or self.site_values
+            or self.vehicle_legend_counts
         )
+
+    def value(self, key: str) -> float | None:
+        """读取一项场地数值；未配置时返回 None（调用方应跳过对应推断）。"""
+        return self.site_values.get(key)
+
+    def legend_count(self, vehicle_id: str) -> float | None:
+        return self.vehicle_legend_counts.get(vehicle_id)
 
     def patterns_for(self, model: str) -> list[re.Pattern[str]]:
         return self.compiled_label.get(model, [])
@@ -185,7 +199,37 @@ def load_site_adaptations(rules_dir: Path | None = None, *, data: dict[str, Any]
             if items:
                 extra_quantity_patterns[name] = items
 
+    site_values: dict[str, float] = {}
+    raw_site = payload.get("site_values")
+    if isinstance(raw_site, dict):
+        for key, value in raw_site.items():
+            name = str(key or "").strip()
+            if not name:
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number == number and number not in {float("inf"), float("-inf")}:
+                site_values[name] = number
+
+    vehicle_legend_counts: dict[str, float] = {}
+    raw_legend = payload.get("vehicle_legend_counts")
+    if isinstance(raw_legend, dict):
+        for key, value in raw_legend.items():
+            name = str(key or "").strip()
+            if not name:
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                vehicle_legend_counts[name] = number
+
     return SiteAdaptations(
+        site_values=site_values,
+        vehicle_legend_counts=vehicle_legend_counts,
         extra_layer_keywords=extra_layer_keywords,
         extra_quantity_patterns=extra_quantity_patterns,
         label_patterns=label_patterns,

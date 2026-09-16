@@ -54,15 +54,10 @@ PLAN_COPY_OFFSET_X_MM = 178_200.0
 PLAN_COPY_COUNT = 4
 PLAN_MIN_Y_MM = -1_055_000.0
 PLAN_MAX_Y_MM = -760_000.0
-TRAY_LABEL_TOLERANCE_MM = 2_000.0
-TRAY_MIN_SEGMENT_MM = 5_000.0
-DOCK_HEIGHT_M = 1.2
-WAREHOUSE_WALL_HEIGHT_M = 10.5
-WAREHOUSE_ROOF_PEAK_HEIGHT_M = 12.6
-POWER_EQUIPMENT_SERVICE_CLEARANCE_M = 0.15
-POWER_EQUIPMENT_SERVICE_CHANNEL_M = 0.30
-POWER_EQUIPMENT_MIN_CENTER_SPACING_MM = 1_500.0
-POWER_EQUIPMENT_WALL_CLEARANCE_M = 0.15
+# 说明：月台高度、库墙高、设备间距、托盘判定阈值等**可能针对特定场地**的数值，
+# 来源与公开授权无法从仓库证据确认，已移出公共代码（见 semantic/site_adaptations.py）。
+# 未配置时对应推断**不套用**，不会回落到任何内置默认值。
+# 保留在此的只有单位换算等与场地无关的基础常量。
 OFFICE_SECOND_FLOOR_ELEVATION_M = 5.5
 OFFICE_ROOM_HEIGHT_M = 4.8
 OFFICE_CONTAINER_ROOM_HEIGHT_M = 3.0
@@ -1679,6 +1674,61 @@ class RuleEngine:
                 return match
         return None
 
+    def _warehouse_shell_attrs(self) -> dict[str, Any]:
+        """仓库外壳高度：只写入已配置的项（公开 standards 或本机私有配置）。"""
+        site = self.standards.get("site") or {}
+        attrs: dict[str, Any] = {}
+        for attr_name, config_key in (
+            ("height_m", "warehouse_wall_height_m"),
+            ("roof_peak_height_m", "warehouse_roof_peak_height_m"),
+        ):
+            raw = site.get(config_key)
+            value = float(raw) if raw is not None else self._site_value(config_key)
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _dock_value_attrs(self) -> dict[str, Any]:
+        """月台相关数值：只写入已配置的项（来自公开 standards 或本机私有配置）。"""
+        dock = self.standards.get("dock") or {}
+        attrs: dict[str, Any] = {}
+        for attr_name, config_key in (
+            ("tail_camera_to_vehicle_gap_m", "camera_to_vehicle_tail_gap_m"),
+            ("vehicle_wall_clearance_m", "vehicle_wall_clearance_m"),
+        ):
+            raw = dock.get(config_key)
+            value = float(raw) if raw is not None else self._site_value(f"dock_{config_key}")
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _power_clearance_attrs(self, channel_key: str) -> dict[str, Any]:
+        """电力设备净空属性：只写入已配置的项（未配置则完全不写，不回落默认值）。"""
+        attrs: dict[str, Any] = {}
+        mapping = (
+            ("maintenance_clearance_m", "power_equipment_service_clearance_m"),
+            ("wall_clearance_m", "power_equipment_wall_clearance_m"),
+            (channel_key, "power_equipment_service_channel_m"),
+        )
+        for attr_name, config_key in mapping:
+            value = self._site_value(config_key)
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _site_value(self, key: str) -> float | None:
+        """读取私有配置中的场地数值；未配置时返回 None（调用方须跳过）。"""
+        return self.adaptations.value(key)
+
+    def _site_value_mm(self, key: str) -> float | None:
+        value = self._site_value(key)
+        return None if value is None else float(value)
+
+    def _vehicle_legend_weight(self, vehicle_id: str) -> float:
+        """车辆图例计数权重；未配置时返回 1.0（等权，而不是某个场地的计数）。"""
+        value = self.adaptations.legend_count(vehicle_id)
+        return float(value) if value else 1.0
+
     def _extra_quantity_patterns(self, key: str) -> list[str]:
         """本机私有配置追加的"数量注释"正则（未配置时为空）。"""
         return list(self.adaptations.extra_quantity_patterns.get(key, []))
@@ -1942,11 +1992,15 @@ class RuleEngine:
         if not ups or not ups.get("geometry", {}).get("position"):
             return devices
         ups_pos = ups["geometry"]["position"]
+        # 设备中心间距属场地数值：未配置则不推断 UPS 电池柜位置
+        spacing_mm = self._site_value("power_equipment_min_center_spacing_mm")
+        if spacing_mm is None:
+            return devices
         core = self._primary_power_room_core_cabinet(devices, ups)
         direction = self._power_equipment_layout_direction(core, ups)
         battery_pos = {
-            "x": float(ups_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-            "y": float(ups_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+            "x": float(ups_pos["x"]) + direction["x"] * spacing_mm,
+            "y": float(ups_pos["y"]) + direction["y"] * spacing_mm,
         }
         ups_attrs = ups.get("attributes") or {}
         battery_attrs = {
@@ -1955,9 +2009,7 @@ class RuleEngine:
             "source_kind": "ups_battery_cabinet_inferred",
             "source_device_id": ups.get("id"),
             "source_label": ups.get("label"),
-            "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-            "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-            "service_channel_to_ups_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+            **self._power_clearance_attrs("service_channel_to_ups_m"),
             "position_source": "weak_current_power_room_service_clearance_rule",
             "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
         }
@@ -1992,8 +2044,9 @@ class RuleEngine:
             return None
         return min(candidates, key=lambda item: RuleEngine._distance(ups_pos, item["geometry"]["position"]))
 
-    @staticmethod
-    def _power_equipment_layout_direction(core: dict[str, Any] | None, ups: dict[str, Any]) -> dict[str, float]:
+    def _power_equipment_layout_direction(
+        self, core: dict[str, Any] | None, ups: dict[str, Any], spacing_mm: float | None = None
+    ) -> dict[str, float]:
         ups_pos = ups.get("geometry", {}).get("position") or {}
         core_pos = core.get("geometry", {}).get("position") if core else None
         if core_pos:
@@ -2004,7 +2057,7 @@ class RuleEngine:
                 if bbox:
                     left_clearance = float(core_pos.get("x", 0.0)) - float(bbox.get("min_x", core_pos.get("x", 0.0)))
                     right_clearance = float(bbox.get("max_x", core_pos.get("x", 0.0))) - float(core_pos.get("x", 0.0))
-                    if max(left_clearance, right_clearance) >= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM * 2:
+                    if spacing_mm and max(left_clearance, right_clearance) >= spacing_mm * 2:
                         return {"x": -1.0 if left_clearance >= right_clearance else 1.0, "y": 0.0}
             length = hypot(dx, dy)
             if length >= 1.0:
@@ -2025,34 +2078,33 @@ class RuleEngine:
         ups = self._primary_ups_device(devices)
         if not ups or not ups.get("geometry", {}).get("position"):
             return
+        spacing_mm = self._site_value("power_equipment_min_center_spacing_mm")
         core = self._primary_power_room_core_cabinet(devices, ups)
-        direction = self._power_equipment_layout_direction(core, ups)
+        direction = self._power_equipment_layout_direction(core, ups, spacing_mm)
         ups_reseated = False
         ups_attrs = ups.setdefault("attributes", {})
         ups_attrs.update(
             {
-                "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-                "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-                "service_channel_to_core_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+                **self._power_clearance_attrs("service_channel_to_core_m"),
                 "position_source": ups_attrs.get("position_source") or "cad_label_with_service_clearance_check",
                 "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
             }
         )
         if core and core.get("geometry", {}).get("position"):
             core_attrs = core.setdefault("attributes", {})
-            core_attrs.setdefault("maintenance_clearance_m", POWER_EQUIPMENT_SERVICE_CLEARANCE_M)
-            core_attrs.setdefault("wall_clearance_m", POWER_EQUIPMENT_WALL_CLEARANCE_M)
-            core_attrs.setdefault("service_channel_to_ups_m", POWER_EQUIPMENT_SERVICE_CHANNEL_M)
+            for key, value in self._power_clearance_attrs("service_channel_to_ups_m").items():
+                core_attrs.setdefault(key, value)
             core_attrs.setdefault("installation_constraint", "floor_cabinet_keep_service_clearance_and_no_wall_contact")
             core_pos = core["geometry"]["position"]
             ups_pos = ups["geometry"]["position"]
-            if (
-                self._distance(core_pos, ups_pos) <= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM
+            # 间距未配置时不做"重新排布"这类位置调整
+            if spacing_mm is not None and (
+                self._distance(core_pos, ups_pos) <= spacing_mm
                 or self._power_equipment_needs_lateral_reseat(core, ups, direction)
             ):
                 ups["geometry"]["position"] = {
-                    "x": float(core_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-                    "y": float(core_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+                    "x": float(core_pos["x"]) + direction["x"] * spacing_mm,
+                    "y": float(core_pos["y"]) + direction["y"] * spacing_mm,
                 }
                 ups_attrs["position_adjustment_source"] = "weak_current_power_room_same_room_lateral_service_channel"
                 ups_reseated = True
@@ -2061,18 +2113,21 @@ class RuleEngine:
             battery_attrs = battery.setdefault("attributes", {})
             battery_attrs.update(
                 {
-                    "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-                    "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-                    "service_channel_to_ups_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+                    **self._power_clearance_attrs("service_channel_to_ups_m"),
                     "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
                 }
             )
             battery_pos = battery.get("geometry", {}).get("position")
             ups_pos = ups.get("geometry", {}).get("position")
-            if battery_pos and ups_pos and (ups_reseated or self._distance(battery_pos, ups_pos) <= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM):
+            if (
+                spacing_mm is not None
+                and battery_pos
+                and ups_pos
+                and (ups_reseated or self._distance(battery_pos, ups_pos) <= spacing_mm)
+            ):
                 battery["geometry"]["position"] = {
-                    "x": float(ups_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-                    "y": float(ups_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+                    "x": float(ups_pos["x"]) + direction["x"] * spacing_mm,
+                    "y": float(ups_pos["y"]) + direction["y"] * spacing_mm,
                 }
                 battery_attrs["position_adjustment_source"] = "weak_current_power_room_same_room_lateral_service_channel"
 
@@ -3212,22 +3267,42 @@ class RuleEngine:
                 "site_profiles": self.site_profiles,
                 "source": "generic_cad_layers",
             }
-        return {
+        # 场地尺寸（月台高度、库墙高、屋脊高等）属场地数值：只写已配置的项。
+        def _site_number(config_key: str, standards_key: str) -> float | None:
+            if site_defaults.get(standards_key) is not None:
+                return float(site_defaults[standards_key])
+            return self._site_value(config_key)
+
+        metadata = {
             "site_type": site_type if len(self.site_profiles) > 1 else site_defaults.get("site_type") or site_type,
             "site_profiles": self.site_profiles,
-            "dock_height_m": float(site_defaults.get("dock_height_m", DOCK_HEIGHT_M)),
-            "warehouse_floor_height_m": float(site_defaults.get("warehouse_floor_height_m", DOCK_HEIGHT_M)),
-            "yard_ground_elevation_m": float(site_defaults.get("yard_ground_elevation_m", 0.0)),
-            "warehouse_wall_height_m": heights.get("warehouse_wall_height_m", float(site_defaults.get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M))),
-            "warehouse_roof_peak_height_m": heights.get("warehouse_roof_peak_height_m", float(site_defaults.get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M))),
-            "tail_camera_to_vehicle_gap_m": float(self.standards.get("dock", {}).get("camera_to_vehicle_tail_gap_m", 5.0)),
-            "vehicle_wall_clearance_m": float(self.standards.get("dock", {}).get("vehicle_wall_clearance_m", 0.6)),
+        }
+        for attr_name, config_key, standards_key in (
+            ("dock_height_m", "dock_height_m", "dock_height_m"),
+            ("warehouse_floor_height_m", "warehouse_floor_height_m", "warehouse_floor_height_m"),
+            ("warehouse_wall_height_m", "warehouse_wall_height_m", "warehouse_wall_height_m"),
+            ("warehouse_roof_peak_height_m", "warehouse_roof_peak_height_m", "warehouse_roof_peak_height_m"),
+        ):
+            measured = heights.get(attr_name)
+            value = float(measured) if measured is not None else _site_number(config_key, standards_key)
+            if value is not None:
+                metadata[attr_name] = value
+        yard = site_defaults.get("yard_ground_elevation_m")
+        if yard is not None:
+            metadata["yard_ground_elevation_m"] = float(yard)
+        return {
+            **metadata,
+            **self._dock_value_attrs(),
             "source": "用户验收反馈 + 施工工艺图高度标注 + 公司标准图例",
             "vehicle_standard": "4.2M箱式货车 / 9.6M箱式货车 / 17.5M集卡挂车 / 61尺集卡",
         }
 
-    @staticmethod
-    def _infer_warehouse_heights(entities: list[dict[str, Any]]) -> dict[str, float]:
+    def _infer_warehouse_heights(self, entities: list[dict[str, Any]]) -> dict[str, float]:
+        """从图纸里的高度标注推断仓库尺寸。
+
+        期望的高度目标值（库墙高/屋脊高的参考点）属场地数值：未配置时**不做该推断**，
+        只保留"能在图上直接读出的候选值"这一中性事实，不挑选、不写入结果。
+        """
         values: set[float] = set()
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
@@ -3240,13 +3315,16 @@ class RuleEngine:
                     continue
                 if 8.0 <= value <= 14.0:
                     values.add(value)
+        wall_target = self._site_value("warehouse_wall_height_m")
+        peak_target = self._site_value("warehouse_roof_peak_height_m")
         heights: dict[str, float] = {}
-        if values:
-            lower = min(values, key=lambda item: abs(item - 10.5))
-            peak = min(values, key=lambda item: abs(item - 12.6))
-            if 9.0 <= lower <= 11.5:
+        if values and wall_target is not None and peak_target is not None:
+            lower = min(values, key=lambda item: abs(item - wall_target))
+            peak = min(values, key=lambda item: abs(item - peak_target))
+            # 容差取目标值的 ±15%，避免把明显无关的高度当成库墙高
+            if abs(lower - wall_target) <= max(0.5, wall_target * 0.15):
                 heights["warehouse_wall_height_m"] = lower
-            if peak >= lower:
+            if peak >= lower and abs(peak - peak_target) <= max(0.5, peak_target * 0.15):
                 heights["warehouse_roof_peak_height_m"] = peak
         return heights
 
@@ -3259,8 +3337,7 @@ class RuleEngine:
                 "仓库外墙",
                 outline["points"],
                 {
-                    "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                    "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                    **self._warehouse_shell_attrs(),
                     "source": "优先采用基准主平面的闭合建筑轮廓线；办公夹层、系统图框、标题框和非基准系统视图结构不参与仓库外墙",
                     "source_structure_id": outline.get("source_structure_id"),
                     "source_layer": outline.get("source_layer"),
@@ -3298,8 +3375,7 @@ class RuleEngine:
             max_x,
             max_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "基准主平面墙体/轮廓/月台图层外包络，停车位、办公夹层、系统图框和标题框不参与仓库外墙包络",
             },
         )
@@ -3465,8 +3541,7 @@ class RuleEngine:
             right_x,
             top_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "基于左右车尾摄像头队列和主体墙/区域/道口边界线推断仓库主体；道路红线、园区外圈、车位阵列外缘和第三方租赁区不参与外墙",
                 "inferred_from": "dock_layout_subject",
                 "left_camera_count": len(left_cluster["cluster"]),
@@ -3981,8 +4056,7 @@ class RuleEngine:
             max_x + pad_x,
             max_y + pad_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "有效平面设备/机柜分布包络推断；施工工艺和安装详图不参与仓库外墙包络",
                 "inferred_from": "operational_devices",
             },
@@ -4320,7 +4394,7 @@ class RuleEngine:
         tail_gap_mm = float(dock_standard.get("camera_to_vehicle_tail_gap_m", 5.0)) * 1000.0
         wall_clearance_mm = float(dock_standard.get("vehicle_wall_clearance_m", 0.6)) * 1000.0
         vehicle_ground_elevation_m = float(self.standards.get("site", {}).get("yard_ground_elevation_m", 0.0))
-        dock_deck_height_m = float(self.standards.get("site", {}).get("dock_height_m", DOCK_HEIGHT_M))
+        dock_deck_height_m = self._site_value("dock_height_m")
         parking_guides = self._parking_guide_points(structures or [])
         self._orient_rear_cameras_by_dock_layout(rear_cameras, shell_area)
         dock_walls = self._dock_wall_x_by_side(rear_cameras, structures or [], shell_area)
@@ -5990,7 +6064,7 @@ class RuleEngine:
         pad_x = 3500.0
         pad_y = 2500.0
         yard_elevation = float(site.get("yard_ground_elevation_m", 0.0))
-        dock_height = float(site.get("dock_height_m", DOCK_HEIGHT_M))
+        dock_height = float(site.get("dock_height_m") or self._site_value("dock_height_m") or 0.0)
         areas = [
             self._rect_area(
                 "area_truck_yard",
@@ -8042,11 +8116,13 @@ class RuleEngine:
 
     def _vehicle_template_sequence(self, count: int) -> list[dict[str, Any]]:
         standards = self.standards.get("vehicles", {})
+        # 说明：车型序列的分配权重若来自某场地图例数量，属场地数值，已移出公共代码。
+        # 这里不再内置任何计数：未配置时按**等权**处理。
         if not standards:
             standards = {
-                "box_4_2": {"label": "4.2M 箱式货车", "legend_count": 86, "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
-                "box_9_6": {"label": "9.6M 箱式货车", "legend_count": 65, "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
-                "container_61ft": {"label": "61尺 集卡", "legend_count": 59, "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
+                "box_4_2": {"label": "4.2M 箱式货车", "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
+                "box_9_6": {"label": "9.6M 箱式货车", "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
+                "container_61ft": {"label": "61尺 集卡", "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
             }
         ordered = [
             {"id": key, **value}
@@ -8055,18 +8131,25 @@ class RuleEngine:
         ]
         if not ordered:
             ordered = [
-                {"id": "box_4_2", "label": "4.2M 箱式货车", "legend_count": 86, "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
-                {"id": "box_9_6", "label": "9.6M 箱式货车", "legend_count": 65, "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
-                {"id": "container_61ft", "label": "61尺 集卡", "legend_count": 59, "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
+                {"id": "box_4_2", "label": "4.2M 箱式货车", "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
+                {"id": "box_9_6", "label": "9.6M 箱式货车", "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
+                {"id": "container_61ft", "label": "61尺 集卡", "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
             ]
-        total_weight = sum(float(item.get("legend_count", 1)) for item in ordered) or len(ordered)
+        # 权重优先级：本机私有配置 > 公开 standards > 等权 1.0
+        weights = [
+            self._vehicle_legend_weight(str(item.get("id")))
+            if self.adaptations.legend_count(str(item.get("id"))) is not None
+            else float(item.get("legend_count") or 1.0)
+            for item in ordered
+        ]
+        total_weight = sum(weights) or len(ordered)
         sequence: list[dict[str, Any]] = []
         remaining = count
         for idx, item in enumerate(ordered):
             if idx == len(ordered) - 1:
                 item_count = remaining
             else:
-                item_count = int(round(count * float(item.get("legend_count", 1)) / total_weight))
+                item_count = int(round(count * weights[idx] / total_weight))
                 item_count = max(0, min(item_count, remaining))
             sequence.extend([item] * item_count)
             remaining -= item_count
@@ -10975,7 +11058,7 @@ class RuleEngine:
                     point["y"] - 1200.0,
                     point["x"] + 1800.0,
                     point["y"] + 1200.0,
-                    {"height_m": DOCK_HEIGHT_M, "source": "STRS升降平台/月台图层"},
+                    {"source": "STRS升降平台/月台图层", **({"height_m": self._site_value("dock_height_m")} if self._site_value("dock_height_m") is not None else {})},
                 )
             )
         return areas
@@ -11043,9 +11126,12 @@ class RuleEngine:
                 }
             )
 
+        # 托盘/桥架判定阈值属场地数值：未配置时不设阈值（不回落内置值）
+        tray_min_segment_mm = self._site_value("tray_min_segment_mm")
+        tray_tolerance_mm = self._site_value("tray_label_tolerance_mm")
         segments: list[dict[str, Any]] = []
         for axis in ("x", "y"):
-            for cluster in self._cluster_markers(markers, axis):
+            for cluster in self._cluster_markers(markers, axis, tray_tolerance_mm):
                 ordered = sorted(cluster, key=lambda item: item["position"]["y" if axis == "x" else "x"])
                 for start, end in zip(ordered, ordered[1:]):
                     p1 = start["position"]
@@ -11057,7 +11143,7 @@ class RuleEngine:
                         avg_y = (p1["y"] + p2["y"]) / 2.0
                         points = [{"x": p1["x"], "y": avg_y}, {"x": p2["x"], "y": avg_y}]
                     length_mm = line_length(points)
-                    if length_mm < TRAY_MIN_SEGMENT_MM:
+                    if tray_min_segment_mm is not None and length_mm < tray_min_segment_mm:
                         continue
                     segments.append(
                         {
@@ -11077,8 +11163,9 @@ class RuleEngine:
                     )
         return self._dedup_linear_items(segments)
 
-    @staticmethod
-    def _cluster_markers(markers: list[dict[str, Any]], axis: str) -> list[list[dict[str, Any]]]:
+    def _cluster_markers(
+        self, markers: list[dict[str, Any]], axis: str, tolerance_mm: float | None = None
+    ) -> list[list[dict[str, Any]]]:
         if not markers:
             return []
         ordered = sorted(markers, key=lambda item: item["position"][axis])
@@ -11087,7 +11174,7 @@ class RuleEngine:
         current_value = ordered[0]["position"][axis]
         for marker in ordered[1:]:
             value = marker["position"][axis]
-            if abs(value - current_value) <= TRAY_LABEL_TOLERANCE_MM:
+            if tolerance_mm is None or abs(value - current_value) <= tolerance_mm:
                 current.append(marker)
                 current_value = sum(item["position"][axis] for item in current) / len(current)
             else:

@@ -10,51 +10,129 @@
 
 ---
 
-## 快速开始（自包含，不需要额外脚本）
+## 最短上手流程
 
-只依赖仓库内被跟踪的文件。首次运行会自动创建 `.venv` 并安装 `requirements.txt`。
+只依赖仓库内被跟踪的文件，不依赖任何被忽略的脚本、私有工具或客户图纸。
+需要 **Python 3.10+**；DXF 流程**不需要** ODA，也不需要 Node.js。
+
+### 1. 本机默认启动
 
 macOS / Linux：
 
 ```bash
 ./start.sh                # 回环地址 + 自动挑端口（8000-8020）+ 自动打开浏览器
-./start.sh --no-open      # 不打开浏览器
-./start.sh --port 8000    # 指定端口
-./stop.sh                 # 停止
 ```
 
-然后访问 `http://127.0.0.1:<端口>/`（脚本会打印实际地址）。健康检查：`GET /api/health`。
-
-Windows：
+Windows（PowerShell）：
 
 ```powershell
 .\start-project.ps1        # 或双击「启动项目.bat」
-.\stop-project.ps1
 ```
 
-页面由 FastAPI 直接提供（原生 JS + Three.js，**没有构建步骤**，默认不需要 Node.js）。
-
-可选：需要 Vite HMR 时 `./start.sh --vite`（需要 Node.js）；直接运行后端也可以：
+也可以不借助任何脚本，直接跑受管启动器（跨平台一致）：
 
 ```bash
-python backend/server.py --port 8000 --no-open
+python backend/server.py --port 8000 --no-open   # 首次先 pip install -r requirements.txt
 ```
 
-### 局域网访问（显式开启 + 必须鉴权）
+`start.sh` 首次运行会自动创建 `.venv` 并安装 `requirements.txt`。脚本会打印实际访问地址
+（默认 `http://127.0.0.1:<端口>/`）。健康检查：`GET /api/health`。
 
-默认只监听回环地址。局域网模式必须显式开启，并会自动生成访问令牌：
+### 2. 用仓库内的合成样例跑通一遍
+
+仓库自带一张合成图（无任何客户数据），可直接上传：
+
+```
+tests/fixtures/generic_electrical_min.dxf     # 5 个设备 + 2 条线路 + 1 个结构
+```
+
+也可以现场生成其它合成样例（单位、弧形/闭合、块变换、空图、未知块等）。
+生成脚本**不会**改写仓库内被跟踪的夹具，默认写到临时目录并打印路径：
 
 ```bash
-./start.sh --lan           # 自动生成令牌并打印带 token 的访问地址
-# 或
-CAD_ACCESS_TOKEN=<你的令牌> python backend/server.py --host 0.0.0.0 --port 8000
+# 重新生成与仓库夹具等价的一张图（写到临时目录）
+python -m tests.eval.make_generic_fixture
+# 写到指定路径
+python -m tests.eval.make_generic_fixture ./sample.dxf
+
+# 生成其它类型的样例（bulge=弧形+闭合 / unit_scale_line=单位 / block_transform=块变换 …）
+python -c "import sys; sys.path.insert(0,'.'); from pathlib import Path; from tests.synthetic import BUILDERS, build_named, write_dxf; \
+print(', '.join(sorted(BUILDERS))); write_dxf(Path('sample-bulge.dxf'), build_named('bulge'))"
 ```
 
-未设置令牌时，绑定非回环地址会被拒绝启动（不会以无鉴权状态暴露到局域网）。
+可用生成器：`basic`、`bulge`、`empty`、`unit_scale_line`、`block_transform`、
+`duplicate_legend`、`unknown_block`、`unsupported_entity`、`role_block`、`role_block_unrotated`、`nested_role_block`。
 
-**局域网模式下，未认证的访问者无法枚举、读取或导出任何项目与图纸内容**，也不能连接日志 WebSocket；
-首次打开页面会看到登录界面，粘贴令牌即可（详见下文「访问模型与安全边界」）。
-令牌会显示在启动日志里，只应发给可信同事；转让后可用顶栏「退出登录」清除本机会话。
+### 3. 解析并查看结果
+
+1. 页面左上「上传 DWG/DXF」→ 选 `tests/fixtures/generic_electrical_min.dxf`。
+2. 解析默认走 `generic` profile（不启用任何客户场地推断）。
+3. 右侧图层面板可开关图层；「视角控制」可切换透视 / 俯视 / 重置视角。
+4. 「实时日志」会显示读取实体数、单位解析结果、识别到的设备/线路/结构数量。
+
+### 4. 导出
+
+- **项目导出（JSON）**：`GET /api/projects/{id}/export`，用于二次处理或核对。
+- **静态导出（HTML）**：页面「文件 / 分享 ▾ → 导出静态 HTML」，生成自包含离线页。
+- **分享链接**：同一菜单里的「复制分享链接」（需要认证时使用作用域分享令牌，见下文）。
+
+### 5. 可选的局域网认证与受控分享
+
+```bash
+./start.sh --lan              # 自动生成访问令牌并打印带 token 的地址
+```
+
+局域网模式下未认证的访问者读不到任何项目与导出文件；把带令牌的地址发给可信同事即可。
+分享单个导出页时使用「复制分享链接」，它签发的令牌**只对那一个导出页有效**、可过期、可撤销，
+且**不含**主访问令牌。
+
+### 6. 停止服务
+
+```bash
+./stop.sh                     # macOS / Linux
+```
+
+```powershell
+.\stop-project.ps1            # Windows
+```
+
+### 7. 常见错误与恢复
+
+| 现象 | 原因与处理 |
+|---|---|
+| 页面一直停在「需要访问令牌」 | 服务启用了访问控制。粘贴启动日志里打印的令牌；忘掉令牌可重启服务重新生成，或查 `CAD_ACCESS_TOKEN`。 |
+| 登录后立刻又被要求登录 | 浏览器禁用 Cookie 时无法维持会话；改用「在 URL 带令牌」的方式（`http://127.0.0.1:<端口>/?token=<令牌>`）。 |
+| 输入框提示「访问令牌不正确」 | 令牌抄错或服务已重启换了令牌；从启动日志重新复制。 |
+| 上传 DWG 报 503 | 本机没有 ODA File Converter（仅影响 DWG）。**改传 DXF 即可**，或安装 ODA 后重启。 |
+| 解析报错并提示「DXF 解析失败」 | 文件不是合法 DXF/DWG，或版本过新；用 `ezdxf` 支持的版本另存后再试。 |
+| 页面提示单位待确认 | 图纸未声明单位（`$INSUNITS=0`）或单位码未知；解析时显式选择单位（见「单位与几何」）。 |
+| 端口一直显示被占用 | 脚本会自动跳到 8000-8020 内的空闲端口；也可 `./start.sh --port 8123` 指定。 |
+| 停止脚本说没找到实例 | 服务可能没在跑；确认 `.cad-runtime/server.json`（或 Windows 的 `.cad-server.json`）是否存在。 |
+| 「导出静态 HTML」按钮不可用 | 该能力不可用时会返回 503 并说明原因；`GET /api/health` 的 `capabilities` 会列出具体原因。 |
+
+---
+
+### 关于 DWG 与 DXF（能力边界，务必分清）
+
+| | DXF | DWG |
+|---|---|---|
+| 是否需要额外工具 | 否，`ezdxf` 直接读 | **需要 ODA File Converter**（免费但需自行安装） |
+| 干净检出可用性 | ✅ 可用 | ⚠️ 取决于本机是否安装 ODA |
+| 未安装时上传表现 | 正常 | 返回 **503**，提示「DXF 不受影响，可直接上传 DXF」 |
+
+本仓库**不附带** ODA，也不会代为安装。`GET /api/health` 的 `oda_available` 与
+`capabilities.dwg_convert` 会如实报告本机状态；未安装时请不要把 DWG 能力描述为已支持。
+
+### 局域网访问速查
+
+```bash
+./start.sh --lan                                  # macOS / Linux：自动生成令牌
+.\start-project.ps1 -Lan                          # Windows：同上
+CAD_ACCESS_TOKEN=<令牌> python backend/server.py --host 0.0.0.0   # 手动指定
+```
+
+未设置令牌时绑定非回环地址会被**拒绝启动**（不会以无鉴权状态暴露到局域网）。
+局域网模式下未认证的访问者读不到任何项目与导出文件；完整规则见下文「访问模型与安全边界」。
 
 ---
 
@@ -169,6 +247,32 @@ CAD_ACCESS_TOKEN=<你的令牌> python backend/server.py --host 0.0.0.0 --port 8
 - **块引用变换**（旋转、镜像/负缩放、非均匀缩放、嵌套）按实体 OCS 正确展开；镜像块曾丢失插入点平移，现已修复并加回归测试。
 - 每个实体保留 `source_entity_id`（DXF handle），预览坐标可回溯原始实体。
 
+### 识别结果的来源与可追溯性
+
+每条结果区分**来源**并保留追溯键，便于人工复核：
+
+| 来源 | 标识 | 含义 |
+|---|---|---|
+| 原始 CAD 实体 | `source_entity_id`（DXF handle）、`entity_type`、`layer` | 直接来自图纸，可定位回原图 |
+| 规则推断 | `rule_id` / `active_rule_sets`、`route_source`、`attributes.source_kind` | 由 `mapping.yaml` / profile 规则匹配得出 |
+| 人工摆放 | `attributes.source_kind = "placement_studio"`，存于独立 `model-overrides` | 与规则推断分离，重新解析不会覆盖 |
+
+识别结果中带 `confidence` 与 `review_needed`，质量报告（`quality`）会给出待复核项与图层审计，
+供人工判断而不是直接把推断当成事实。
+
+### 已知限制（不要按「通用识别已完成」理解）
+
+- **规则是关键词 + 图层/块名匹配**，不是几何理解，也不会用 LLM 补全缺失建筑。
+  命名规范差异大的图纸识别率会明显下降；`unknown` 计数与质量报告里的待复核项即反映这一点。
+- **块嵌套超过一层时不会展开虚拟几何**（实测记录，见 `tests/test_dxf_blocks.py`）：
+  外层块命中角色、内层再引用图形时，`cad_virtual_shapes` 为空。
+- 只有命中 CAD 角色关键词的块（如摄像头 / AP / 半球 / 鱼眼 / 枪机，以及车位兜底）才会生成
+  虚拟几何；其他块只保留插入点与块名。
+- **DIMENSION 的渲染文本与块内标注**、MINSERT、XCLIP 未测试。
+- **UCS/倾斜 extrusion** 只做了平面长度补偿，缺少合成夹具覆盖。
+- DWG 转换的正确性取决于本机 ODA；**DWG → DXF 链路本身未经本项目测试**（未附带 ODA）。
+- 没有公开的大图纸性能基准，因此**不承诺**解析耗时、内存或首屏时间。
+
 ---
 
 ## 数据存储与并发
@@ -205,7 +309,9 @@ CAD_ACCESS_TOKEN=<你的令牌> python backend/server.py --host 0.0.0.0 --port 8
 3. 解析默认走 `generic`。需要场地推断时再显式启用 `express` / `supply_chain`。
 4. 后端用 ezdxf 读实体（DWG 先经 ODA 转 DXF），规则引擎生成语义结果。
 5. 前端 Three.js 生成 3D。用图层开关、视角和对象信息面板查看。
-6. 需要人工摆放时，在「摆放试验场」项目里摆放/移动/撤销并保存；保存的是独立 overrides。
+6. 需要人工摆放时，在「摆放试验场」项目里摆放/移动/撤销并保存；保存的是独立 overrides
+   （`model-overrides/model-overrides.json`），与规则推断结果分离，重新解析不会清空。
+7. 保存带 revision：两个页面同时编辑时，旧版本保存会得到 **409 冲突**而不是覆盖对方修改。
 
 ---
 
@@ -251,15 +357,50 @@ python tests/regression_counts.py     # 需要本机已有解析结果
 
 `SPEC.md` 与 `AGENTS.md` 是早期设计文档，其中的 Vue/Pinia 方案**仅作历史参考**：当前实现是原生 JS + Three.js，没有构建步骤；后续不会据此迁移前端。
 
-第三方素材与许可证：`docs/assets/` 下的脱敏演示图与 `frontend/vendor/three/`（Three.js，MIT）随仓库分发。仓库整体许可证需要所有者确认后再声明。
+### 许可证
+
+**本仓库当前没有 `LICENSE` 文件，也没有声明整体许可证。** 在维护者明确决定之前：
+
+- 默认版权状态为「保留所有权利」。公开可见 ≠ 已授权他人使用、修改或再分发。
+- 这是**维护者决策项**，不是技术缺口：需要所有者选定许可证（例如 MIT / Apache-2.0 / 其他），
+  并确认可以对仓库内全部内容授权。
+- 由 agent 代选的许可证不具有授权效力，因此本项目不会代为添加 `LICENSE`。
+
+随仓库分发的第三方内容：
+
+| 内容 | 许可 | 说明 |
+|---|---|---|
+| `frontend/vendor/three/` | MIT（Three.js） | 原样保留，未修改 |
+| `docs/assets/demo-sanitized.png` | 项目自有（脱敏演示图） | 不含客户信息 |
+
+客户图纸、客户规则与内部工具**不属于**可授权范围，也不会加入本仓库。
 
 ---
 
 ## 依赖
 
-- Python 3.10+
-- 运行：FastAPI / Uvicorn / ezdxf / PyYAML / aiofiles / python-multipart / websockets
-- 可选：ODA File Converter（仅 DWG → DXF）、matplotlib（视觉审计截图）、Node.js（仅 Vite 开发预览）
-- 测试：pytest / httpx（见 `requirements-dev.txt`）
+**必需**（`requirements.txt`，Python 3.10+）：
+
+| 包 | 用途 |
+|---|---|
+| `fastapi` / `uvicorn` / `python-multipart` / `websockets` | HTTP/WebSocket 服务与上传 |
+| `ezdxf` | DXF 读取（**DXF 全流程的唯一 CAD 依赖**） |
+| `PyYAML` | 识别规则与 profile 配置 |
+| `aiofiles` | 上传流式写入 |
+| `matplotlib` | 视觉审计截图（`visual_audit` 能力） |
+| `playwright` | 仅内部 replay 编排器需要；公开分发不含 `orchestrator/`，因此该能力默认不可用 |
+
+**可选（不由本仓库附带，需自行安装）**：
+
+- **ODA File Converter**：仅用于 **DWG → DXF**。缺失时 DWG 上传返回 503，**DXF 不受影响**。
+  可用 `GET /api/health` 的 `oda_available` / `capabilities.dwg_convert` 查看本机状态。
+- **Node.js**：仅在使用 `./start.sh --vite` 的开发预览时需要；默认页面由 FastAPI 直接提供，**不需要 Node**。
+
+**测试**（`requirements-dev.txt`）：`pytest` 与 `httpx`（Starlette `TestClient` 需要 httpx）。
+缺少 httpx 时 HTTP 层测试会明确报错，而不是静默跳过；不会去改动全局环境。
+
+```bash
+pip install -r requirements-dev.txt    # 运行 + 测试依赖
+```
 
 离线安装可先 `pip download -r requirements.txt -d wheelhouse`，再把 `wheelhouse/` 一并拷走。

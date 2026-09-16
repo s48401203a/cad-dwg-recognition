@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import socket
 import sys
 import time
@@ -114,6 +115,42 @@ def running_state() -> dict | None:
     return None
 
 
+def legacy_state_path() -> Path:
+    """Windows 启动脚本沿用的 `.cad-server.json`（仓库根目录，已被 .gitignore 排除）。"""
+    name = os.environ.get("CAD_SERVER_STATE_NAME") or "cad-server"
+    return ROOT_DIR / f".{name}.json"
+
+
+def write_legacy_state(state: dict) -> Path | None:
+    """为 `stop-project.ps1` / `启动项目.ps1` 这类既有 Windows 脚本写兼容状态文件。
+
+    这些脚本读取 `{pid, port, url}`，字段保持一致；失败不影响服务运行。
+    """
+    try:
+        path = legacy_state_path()
+        payload = {
+            "pid": state.get("pid"),
+            "port": state.get("port"),
+            "url": state.get("url"),
+            "root": str(ROOT_DIR),
+            "backend": str(BASE_DIR),
+            "started_at": state.get("started_at"),
+        }
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+    except OSError:
+        return None
+
+
+def clear_legacy_state() -> None:
+    try:
+        legacy_state_path().unlink()
+    except OSError:
+        pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CAD 3D preview server")
     parser.add_argument("--host", default=os.environ.get("CAD_HOST") or "127.0.0.1")
@@ -124,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reload", action="store_true", help="开发模式热重载")
     parser.add_argument("--state-only", action="store_true", help="只写运行期状态并退出（供脚本查询）")
     parser.add_argument("--status", action="store_true", help="打印当前运行实例状态后退出")
+    parser.add_argument(
+        "--legacy-state",
+        action="store_true",
+        help="兼容 Windows 启动脚本：额外写出 .cad-server.json（供 stop-project.ps1 读取）",
+    )
     return parser
 
 
@@ -184,6 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     path = write_state(state)
     print(f"[server] {access_url}")
     print(f"[server] state: {path}")
+    if args.legacy_state:
+        legacy = write_legacy_state(state)
+        if legacy:
+            print(f"[server] legacy state: {legacy}")
     if args.state_only:
         return 0
 
@@ -197,7 +243,24 @@ def main(argv: list[str] | None = None) -> int:
         import uvicorn
     except ImportError:
         print("[server] 缺少 uvicorn，请先安装依赖：pip install -r requirements.txt")
+        clear_state()
+        if args.legacy_state:
+            clear_legacy_state()
         return 3
+
+    # 让 `stop.sh` / `kill` 这类 SIGTERM 走正常退出路径，从而清理状态文件
+    # （否则会留下指向已退出进程的陈旧状态，Windows 停止脚本可能据此误判）。
+    def _handle_term(_signum, _frame):  # noqa: ANN001
+        raise SystemExit(0)
+
+    for signal_name in ("SIGTERM", "SIGINT"):
+        signal_value = getattr(signal, signal_name, None)
+        if signal_value is None:
+            continue
+        try:
+            signal.signal(signal_value, _handle_term)
+        except (OSError, ValueError):
+            pass
 
     try:
         uvicorn.run(
@@ -212,6 +275,8 @@ def main(argv: list[str] | None = None) -> int:
         current = read_state()
         if current and current.get("pid") == os.getpid():
             clear_state()
+            if args.legacy_state:
+                clear_legacy_state()
     return 0
 
 

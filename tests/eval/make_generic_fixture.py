@@ -61,5 +61,22 @@ def build_generic_electrical_min(path: Path = FIXTURE_PATH) -> Path:
 
 
 if __name__ == "__main__":
-    output = build_generic_electrical_min()
-    print(output)
+    # 默认**不**写回被跟踪的夹具文件：直接运行脚本不应修改工作区。
+    # 需要落到磁盘时显式给出路径，例如：
+    #   python -m tests.eval.make_generic_fixture /tmp/sample.dxf      （写到指定路径）
+    #   python -m tests.eval.make_generic_fixture --tracked           （确认后才覆盖仓库夹具，仅供维护者）
+    import sys
+
+    args = [item for item in sys.argv[1:]]
+    if "--tracked" in args:
+        target = FIXTURE_PATH
+    elif args:
+        target = Path(args[0]).expanduser()
+    else:
+        import tempfile
+
+        target = Path(tempfile.mkdtemp(prefix="cad-sample-")) / "generic_electrical_min.dxf"
+    path = build_generic_electrical_min(target)
+    print(path)
+    if path == FIXTURE_PATH:
+        print("注意：已覆盖仓库内被跟踪的夹具，请检查 git diff 后再提交。")

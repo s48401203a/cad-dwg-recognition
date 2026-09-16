@@ -6078,11 +6078,38 @@ class RuleEngine:
             "warnings": warnings,
         }
 
+    @staticmethod
+    def _display_source(path: Any) -> str | None:
+        """把内部配置路径转成**不含本机绝对路径**的展示值。
+
+        语义结果会随导出/分享外发，因此这里只保留仓库内相对路径或文件名，
+        避免把安装位置（如 /Users/<name>/...）写进导出内容。
+        """
+        if path is None:
+            return None
+        text = str(path)
+        if not text:
+            return None
+        candidate = Path(text)
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        for root in (Path(__file__).resolve().parents[1].parent, Path(__file__).resolve().parents[1]):
+            try:
+                return resolved.relative_to(root.resolve()).as_posix()
+            except (OSError, ValueError):
+                continue
+        if candidate.is_absolute():
+            return candidate.name
+        return candidate.as_posix()
+
     def _parse_capability_summary(self) -> dict[str, Any]:
         standards = self.layer_render_standards or {}
         modules = standards.get("module_standards") or {}
         return {
-            "source": str(self.layer_render_standards_path),
+            # 只暴露仓库内相对路径/文件名，不回显本机安装路径
+            "source": self._display_source(self.layer_render_standards_path),
             "version": standards.get("version"),
             "status": standards.get("status"),
             "site_profiles": self.site_profiles,

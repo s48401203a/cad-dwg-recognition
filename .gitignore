@@ -1,5 +1,6 @@
 # Local runtime state
 .cad-server.json
+.*.json
 .cad-runtime/
 .tmp-verify/
 .codex-tmp/

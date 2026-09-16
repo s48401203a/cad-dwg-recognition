@@ -137,6 +137,33 @@ def test_export_response_contains_no_local_paths(client, clean_runtime, tmp_path
         assert "dxf_path" not in drawing
 
 
+def test_export_contains_no_absolute_paths_anywhere(client, clean_runtime, tmp_path: Path):
+    """回归：导出/分享内容里不得出现任何本机绝对路径。
+
+    历史缺陷：`quality.layer_render_standard.source` 与 `parse_capabilities.source`
+    直接写入配置文件的绝对路径（如 /Users/<name>/...），导出与被分享的静态页都会带上。
+    """
+    import re
+
+    dxf = write_dxf(tmp_path / "abs.dxf", build_basic_fixture())
+    upload = _upload_dxf(client, dxf)
+    parsed = client.post("/api/parse", json={"file_id": upload["file_id"], "site_profiles": ["generic"]})
+    assert parsed.status_code == 200, parsed.text
+    project_id = parsed.json()["project"]["id"]
+    drawing_id = parsed.json()["project"]["drawing_id"]
+
+    body = client.get(f"/api/projects/{project_id}/export?drawing_id={drawing_id}").text
+    absolute_hits = re.findall(r"/Users/[^\s\"',]{0,60}|[A-Za-z]:\\\\[^\s\"',]{0,60}", body)
+    assert not absolute_hits, f"导出内容不应包含本机绝对路径，命中: {absolute_hits[:3]}"
+
+    capabilities = json.loads(body).get("parse_capabilities") or {}
+    assert "/" not in str(capabilities.get("source") or "") or not str(capabilities["source"]).startswith("/"), (
+        "配置来源应显示为仓库内相对路径，而不是本机绝对路径"
+    )
+    standard = (json.loads(body).get("quality") or {}).get("layer_render_standard") or {}
+    assert not str(standard.get("source") or "").startswith("/"), standard.get("source")
+
+
 def test_upload_records_relative_to_upload_root(client, clean_runtime):
     dxf = write_dxf(clean_runtime["root"] / "u.dxf", build_basic_fixture())
     upload = _upload_dxf(client, dxf)

@@ -19,8 +19,14 @@ function backendTarget() {
             return `http://127.0.0.1:${port}`;
         }
     }
-    const stateFile = resolve(rootDir, '.cad-server.json');
-    if (existsSync(stateFile)) {
+    // 受管启动器 backend/server.py 写的是 .cad-runtime/server.json；
+    // Windows 脚本族还会写 .cad-server.json（--legacy-state）。两个都读，顺序在后。
+    const stateFiles = [
+        resolve(rootDir, '.cad-runtime', 'server.json'),
+        resolve(rootDir, '.cad-server.json'),
+    ];
+    for (const stateFile of stateFiles) {
+        if (!existsSync(stateFile)) continue;
         try {
             const state = JSON.parse(readFileSync(stateFile, 'utf8'));
             if (state && typeof state.url === 'string' && state.url.startsWith('http')) {
@@ -30,7 +36,7 @@ function backendTarget() {
                 return `http://127.0.0.1:${state.port}`;
             }
         } catch {
-            // fall through to default
+            // fall through to next candidate
         }
     }
     return 'http://127.0.0.1:8000';

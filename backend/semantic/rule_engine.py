@@ -11,6 +11,11 @@ from typing import Any
 import yaml
 
 from semantic.geometry_utils import line_length
+from semantic.site_adaptations import (
+    SiteAdaptations,
+    load_site_adaptations,
+    merge_rule_keywords,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 PROJECT_RULES_DIR = Path(os.environ["CAD_PROJECT_RULES_DIR"]).expanduser() if os.environ.get("CAD_PROJECT_RULES_DIR") else None
@@ -261,9 +266,10 @@ SYSTEM_VIEW_REL_BOUNDS_BY_KIND_MM = {
         "max_y": -5_000.0,
     },
 }
-AP_LABEL_PREFIX_PATTERN = r"(?:BFR|BGL)(?:-[A-Z0-9]+){1,2}-(?:BG|CD)-AP-"
-AP_LABEL_PATTERN = re.compile(rf"{AP_LABEL_PREFIX_PATTERN}\d{{1,3}}", re.IGNORECASE)
-AP_LABEL_RANGE_PATTERN = re.compile(rf"({AP_LABEL_PREFIX_PATTERN})(\d{{1,3}})(?:[~～](\d{{1,3}}))?(?=$|[^A-Z0-9~～])", re.IGNORECASE)
+# 说明：设备编号的**具体前缀**与**范围写法**曾是硬编码字面量，来源与公开授权
+# 无法从仓库证据确认，已移到本机私有配置（见 semantic/site_adaptations.py 与
+# `CAD_PROJECT_RULES_DIR/site-adaptations.yaml`）。公共代码只保留通用解析逻辑：
+# 读取配置里的编号/范围模式，未配置时相关分支自然不命中。
 AP_LAYOUT_SPACING_FACTOR = 0.55
 DOME_COVERAGE_SECTOR_ANGLE_DEG = 90.0
 AP_LAYOUT_RADIUS_LIMITS_M = {
@@ -298,8 +304,8 @@ DEVICE_CABLE_CAD_ROLES = {
     "dome_coverage",
 }
 DEVICE_CABLE_LAYER_KEYWORDS = (
-    "IT弱电规划-摄像机",
-    "IT弱电规划-AP",
+    # 通用词。项目/客户专属的图层名样式由本机私有配置
+    # （site-adaptations.yaml 的 extra_layer_keywords）追加，不再写死在公共代码里。
     "摄像机",
     "摄像头",
     "鱼眼",
@@ -335,6 +341,10 @@ PROJECT_REAR_CAMERA_TAIL_GAP_RULES = (
 )
 
 
+#: 主平面图框的**中性**标题（不含任何项目/方案名称）
+MAIN_PLAN_TITLE = "主平面"
+
+
 class RuleEngine:
     def __init__(
         self,
@@ -351,6 +361,10 @@ class RuleEngine:
         self.manual_main_frame = manual_main_frame
         self.profile_configs = self._load_selected_profile_configs(self.site_profiles, profiles_dir)
         self.rules = self._merge_profile_rules(yaml.safe_load(mapping_path.read_text(encoding="utf-8")))
+        # 本机私有"场地适配"：设备编号模式与项目/方案名称关键词等，
+        # 未配置时为空（不内置任何供应商/客户前缀）。
+        self.adaptations: SiteAdaptations = load_site_adaptations()
+        merge_rule_keywords(self.rules, self.adaptations)
         base_standards = yaml.safe_load(standards_path.read_text(encoding="utf-8")) if standards_path.exists() else {}
         self.standards = self._merge_profile_standards(base_standards)
         self.layer_render_standards_path = layer_render_standards_path
@@ -1610,8 +1624,104 @@ class RuleEngine:
                     device.setdefault("attributes", {})["deduped_symbol_fisheye_count"] = symbol_dropped
         return kept
 
-    @staticmethod
-    def _dedup_ap_label_symbol_devices(devices: list[dict[str, Any]], expected: dict[str, int]) -> list[dict[str, Any]]:
+    # ------------------------------------------------------------ 场地适配（本机私有配置）
+    # 说明：下面这些辅助方法只做"读配置 + 通用匹配"，不内置任何供应商/客户字面量。
+    # 未配置 `site-adaptations.yaml` 时全部返回"不匹配"，行为等价于该适配不存在。
+
+    def _matches_adaptation_label(self, model: str, text: str) -> bool:
+        """整串匹配某个模型的编号模式（来自私有配置）。"""
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        return any(pattern.fullmatch(candidate) for pattern in self.adaptations.patterns_for(model))
+
+    def _search_adaptation_label(self, model: str, text: str) -> bool:
+        """在文本中搜索某个模型的编号模式（来自私有配置）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(pattern.search(candidate) for pattern in self.adaptations.patterns_for(model))
+
+    def _search_adaptation_range_any(self, text: str) -> bool:
+        """在文本中搜索任意模型的编号范围模式（来自私有配置）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(pattern.search(candidate) for pattern in self.adaptations.all_range_patterns())
+
+    def _adaptation_range_matches(self, model: str, text: str) -> list[re.Match[str]]:
+        matches: list[re.Match[str]] = []
+        candidate = str(text or "")
+        if not candidate:
+            return matches
+        for pattern in self.adaptations.range_patterns_for(model):
+            matches.extend(pattern.finditer(candidate))
+        return matches
+
+    def _adaptation_range_fullmatch(self, model: str, text: str) -> re.Match[str] | None:
+        candidate = str(text or "")
+        if not candidate:
+            return None
+        for pattern in self.adaptations.range_patterns_for(model):
+            match = pattern.fullmatch(candidate)
+            if match:
+                return match
+        return None
+
+    def _adaptation_fullmatch_any(self, model: str, text: str) -> re.Match[str] | None:
+        """按某个模型整串匹配（模式来自私有配置；未配置返回 None）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return None
+        for pattern in self.adaptations.patterns_for(model):
+            match = pattern.fullmatch(candidate)
+            if match:
+                return match
+        return None
+
+    def _extra_quantity_patterns(self, key: str) -> list[str]:
+        """本机私有配置追加的"数量注释"正则（未配置时为空）。"""
+        return list(self.adaptations.extra_quantity_patterns.get(key, []))
+
+    def _extra_layer_keywords(self) -> list[str]:
+        """本机私有配置追加的图层名关键词（未配置时为空）。"""
+        return list(self.adaptations.extra_layer_keywords)
+
+    def _adaptation_prefixes(self, model: str) -> list[str]:
+        """从私有配置的编号模式里提取可用于"前缀枚举"的字面前缀。
+
+        只提取模式中不含占位符的固定前缀部分；未配置时返回空列表。
+        """
+        prefixes: list[str] = []
+        for raw in self.adaptations.label_range_patterns.get(model, []) + self.adaptations.label_patterns.get(model, []):
+            head = re.split(r"[\{\(\[]", str(raw), maxsplit=1)[0].strip()
+            head = head.rstrip("-_. ")
+            if head and head not in prefixes:
+                prefixes.append(head)
+        return prefixes
+
+    def _label_has_adaptation_token(self, text: str) -> bool:
+        """文本是否含任一私有配置前缀（用于区分"符号"与"文本编号"两类记录）。"""
+        candidate = str(text or "").upper()
+        if not candidate:
+            return False
+        for model in self.adaptations.label_patterns:
+            for prefix in self._adaptation_prefixes(model):
+                if prefix.upper() and prefix.upper() in candidate:
+                    return True
+        return False
+
+    def _matches_project_name_keyword(self, text: str) -> bool:
+        """文本是否含**本机私有配置**给出的项目/方案名称关键词。
+
+        未配置时返回 False（即不把任何字样当作项目名）。
+        """
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(keyword and keyword in candidate for keyword in self.adaptations.project_name_keywords)
+
+    def _dedup_ap_label_symbol_devices(self, devices: list[dict[str, Any]], expected: dict[str, int]) -> list[dict[str, Any]]:
         expected_ap = int(expected.get("ap", 0) or 0)
         if expected_ap <= 0:
             return devices
@@ -1624,7 +1734,7 @@ class RuleEngine:
             device
             for device in ap_devices
             if (device.get("attributes") or {}).get("source_kind") in {"text_label", "text_label_range"}
-            and AP_LABEL_PATTERN.fullmatch(re.sub(r"\s+", "", str(device.get("label", "")).upper()))
+            and self._matches_adaptation_label("ap", re.sub(r"\s+", "", str(device.get("label", "")).upper()))
         ]
         symbol_devices = [
             device
@@ -2155,14 +2265,15 @@ class RuleEngine:
         match = re.search(r"-AP-0*(\d{1,3})$", str(label or "").upper())
         return int(match.group(1)) if match else 0
 
-    @staticmethod
-    def _expected_site_ap_max_number(entities: list[dict[str, Any]]) -> int | None:
+    def _expected_site_ap_max_number(self, entities: list[dict[str, Any]]) -> int | None:
         text = "\n".join(str(entity.get("text") or "") for entity in entities if entity.get("entity_type") in {"TEXT", "MTEXT"})
         compact = re.sub(r"\s+", "", text.upper())
-        patterns = (
+        # 公开版本只保留通用写法；项目专属的编号注释写法由本机私有配置追加
+        # （site-adaptations.yaml 的 extra_quantity_patterns）。
+        patterns = [
             r"AP[：:]?\d{1,3}台[（(]场地(\d{1,3})台",
-            r"场地AP[（(]?编号[：:]?BFR-[A-Z0-9-]+-AP-0*1[~～]0*(\d{1,3})",
-        )
+            *self._extra_quantity_patterns("ap"),
+        ]
         values: list[int] = []
         for pattern in patterns:
             values.extend(int(match.group(1)) for match in re.finditer(pattern, compact))
@@ -2179,8 +2290,7 @@ class RuleEngine:
             ],
         )
 
-    @staticmethod
-    def _first_expected_ap_range_end(entities: list[dict[str, Any]], label: str) -> int | None:
+    def _first_expected_ap_range_end(self, entities: list[dict[str, Any]], label: str) -> int | None:
         label_text = str(label or "").upper()
         prefix_match = re.match(r"(.+-AP-)0*\d{1,3}$", label_text)
         if not prefix_match:
@@ -2190,7 +2300,7 @@ class RuleEngine:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             compact = re.sub(r"\s+", "", str(entity.get("text") or "").upper())
-            for match in AP_LABEL_RANGE_PATTERN.finditer(compact):
+            for match in self._adaptation_range_matches("ap", compact):
                 if match.group(1).upper() != prefix or not match.group(3):
                     continue
                 return int(match.group(3))
@@ -2325,15 +2435,14 @@ class RuleEngine:
             return f"{match.group(1)}-{int(match.group(2)):02d}"
         return compact
 
-    @staticmethod
-    def _expected_ap_labels(entities: list[dict[str, Any]]) -> list[str]:
+    def _expected_ap_labels(self, entities: list[dict[str, Any]]) -> list[str]:
         labels: list[str] = []
         seen: set[str] = set()
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             compact = re.sub(r"\s+", "", str(entity.get("text") or "").upper())
-            for match in AP_LABEL_RANGE_PATTERN.finditer(compact):
+            for match in self._adaptation_range_matches("ap", compact):
                 prefix = match.group(1)
                 start = int(match.group(2))
                 end = int(match.group(3) or match.group(2))
@@ -2354,7 +2463,7 @@ class RuleEngine:
         raw_text = str(entity.get("text", "")).strip()
         text = re.sub(r"\s+", "", raw_text.upper())
         position = entity.get("geometry", {}).get("position")
-        range_match = AP_LABEL_RANGE_PATTERN.fullmatch(text)
+        range_match = self._adaptation_range_fullmatch("ap", text)
         if range_match and range_match.group(3) and position and len(text) <= 42:
             prefix = range_match.group(1)
             start = int(range_match.group(2))
@@ -2490,7 +2599,7 @@ class RuleEngine:
             semantic_type = "security.camera.dome"
             confidence = 0.95
 
-        elif AP_LABEL_PATTERN.fullmatch(text):
+        elif self._matches_adaptation_label("ap", text):
             semantic_type = "network.ap"
 
         elif re.fullmatch(r"(?:\d{1,2}KVA)?UPS(?:电源|控制主机|主机|电池|电池柜|电池组合主机)?|(?:UPS)?电池柜", text):
@@ -6289,15 +6398,16 @@ class RuleEngine:
                 "evidence": ap_labels[:20],
             },
             "fisheye": {
-                "label_prefixes": ("YY",),
+                # 编号前缀来自本机私有配置；未配置时不做前缀枚举
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.fisheye")),
                 "source_when_found": "cad_fisheye_label_range_or_label_text",
             },
             "dome_camera": {
-                "label_prefixes": ("BG", "OA"),
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.dome")),
                 "source_when_found": "cad_dome_label_text",
             },
             "rear_camera": {
-                "label_prefixes": ("CW", "GX", "CD", "WH", "WW", "KW"),
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.rear")),
                 "source_when_found": "cad_camera_label_range_or_label_text",
             },
             "spotlight": {
@@ -8254,7 +8364,7 @@ class RuleEngine:
             text = re.sub(r"\s+", "", raw_text.upper())
             oa_match = re.fullmatch(r"OA-(\d{1,3})", text)
             bg_camera_match = re.fullmatch(r"BG-(\d{1,3})", text)
-            bg_ap_match = re.fullmatch(r"(?:BFR|BGL)-[A-Z0-9-]+-BG-AP-(\d{1,3})", text)
+            bg_ap_match = self._adaptation_fullmatch_any("office_ap", text)
             if "办公室" in raw_text and "集装箱" in raw_text:
                 container_seeds.append(folded_position)
                 container_related_seeds.append(folded_position)
@@ -8675,7 +8785,7 @@ class RuleEngine:
                     or "钢化玻璃隔断" in raw_text
                     or "空调小室" in raw_text
                     or re.fullmatch(r"BG-?\d{1,3}", compact) is not None
-                    or (AP_LABEL_PATTERN.fullmatch(compact) and "-BG-AP-" in compact)
+                    or (self._matches_adaptation_label("ap", compact) and self._label_has_adaptation_token(compact))
                 )
             )
             if is_upper_main_plan_anchor:
@@ -8737,12 +8847,11 @@ class RuleEngine:
             result[tower_key] = bbox
         return result
 
-    @staticmethod
-    def _is_gatehouse_main_plan_device_label(raw_text: str) -> bool:
+    def _is_gatehouse_main_plan_device_label(self, raw_text: str) -> bool:
         compact = re.sub(r"\s+", "", raw_text.upper())
         if re.fullmatch(r"BG-\d{1,3}", compact):
             return True
-        if AP_LABEL_PATTERN.fullmatch(compact) and "-BG-AP-" in compact:
+        if self._matches_adaptation_label("ap", compact) and self._label_has_adaptation_token(compact):
             return True
         return compact in {"机房", "42U机柜", "UPS电源"}
 
@@ -10808,7 +10917,7 @@ class RuleEngine:
                 is_strong_office = (
                     normalized_text.startswith("OA-")
                     or normalized_text.startswith("BG-")
-                    or re.fullmatch(r"(?:BFR|BGL)-[A-Z0-9-]+-BG-AP-\d{1,3}", normalized_text) is not None
+                    or self._adaptation_fullmatch_any("office_ap", normalized_text) is not None
                     or self._rack_units_from_text(text) is not None
                     or layer == "TK"
                 )
@@ -11316,7 +11425,7 @@ class RuleEngine:
                 self._frame(
                     frame_id="frame_main_plan",
                     kind="main_plan",
-                    title=main_rect.get("title") or "现方案主平面",
+                    title=main_rect.get("title") or MAIN_PLAN_TITLE,
                     bounds=main_rect["bounds"],
                     source=main_rect.get("source") or "cad_plan_frame",
                     source_entity_id=main_rect.get("source_entity_id"),
@@ -11590,14 +11699,14 @@ class RuleEngine:
         if not plan_rects:
             return None
         if len(plan_rects) == 1:
-            return {**plan_rects[0], "title": "现方案主平面", "source": "single_plan_frame"}
+            return {**plan_rects[0], "title": MAIN_PLAN_TITLE, "source": "single_plan_frame"}
         main_seeds: list[dict[str, Any]] = []
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             text = str(entity.get("text") or "")
             normalized = re.sub(r"\s+", "", text)
-            if not any(keyword in normalized for keyword in ("面积变化", "现方案", "当前方案", "新方案", "方案0703", "IT弱电规划")):
+            if not self._matches_project_name_keyword(normalized):
                 continue
             position = entity.get("geometry", {}).get("position")
             if position:
@@ -11609,10 +11718,10 @@ class RuleEngine:
             contains_seed = any(self._point_in_bounds(seed["position"], bounds, pad_mm=10_000.0) for seed in main_seeds)
             candidate = {**rect}
             if contains_seed:
-                candidate["title"] = "现方案主平面"
+                candidate["title"] = MAIN_PLAN_TITLE
                 candidate["source"] = "cad_plan_frame_contains_current_scheme_note"
             else:
-                candidate.setdefault("title", "现方案主平面")
+                candidate.setdefault("title", MAIN_PLAN_TITLE)
                 candidate.setdefault("source", "cad_plan_frame_max_x")
             scored.append(
                 (
@@ -12212,8 +12321,8 @@ class RuleEngine:
             if not normalized:
                 continue
             if (
-                re.search(r"\b(CW|GX|YY|WH|WW|CD|OA)-\d{1,3}\b", normalized)
-                or AP_LABEL_PATTERN.search(normalized)
+                self._search_adaptation_range_any(normalized)
+                or self._search_adaptation_label("ap", normalized)
                 or "机柜" in text
             ):
                 seeds.append(position)
@@ -12476,12 +12585,12 @@ class RuleEngine:
             }
         return None
 
-    @staticmethod
-    def _is_device_cable_layer(layer: str) -> bool:
+    def _is_device_cable_layer(self, layer: str) -> bool:
         if not layer:
             return False
         upper = layer.upper()
-        return any(keyword.upper() in upper for keyword in DEVICE_CABLE_LAYER_KEYWORDS)
+        keywords = list(DEVICE_CABLE_LAYER_KEYWORDS) + list(self._extra_layer_keywords())
+        return any(keyword.upper() in upper for keyword in keywords)
 
     def _filter_cable_candidates(
         self, candidates: list[dict[str, Any]]

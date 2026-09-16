@@ -37,10 +37,10 @@ block_rules:
 
 layer_rules:
   cable.security:
-    keywords: [IT弱电规划-摄像机, CCTV, 监控, 摄像头, CAM, IPC]
+    keywords: [CCTV, 监控, 摄像头, CAM, IPC]
     confidence: 0.88
   cable.network:
-    keywords: [IT弱电规划-网络&广播, 网络, 网线, CAT6, UTP, RJ45, AP, WIFI, 无线, WIRELESS]
+    keywords: [网络, 网线, CAT6, UTP, RJ45, AP, WIFI, 无线, WIRELESS]
     confidence: 0.84
   cable.trunk:
     keywords: [桥架, TRAY, 线槽, CABLETRAY, 弱电管线, 管线]

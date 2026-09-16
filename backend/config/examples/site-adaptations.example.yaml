@@ -1,0 +1,62 @@
+# 本机私有"场地适配"配置模板（**不要填写真实客户数据后提交**）
+#
+# 用途：某些项目/客户的图纸会使用**自己的一套编号前缀与图层命名习惯**。
+# 这类内容不属于通用解析能力，也不再硬编码在公共代码里，而是由本文件提供。
+#
+# 启用方式（只在你的机器上）：
+#   1. 在仓库外建一个私有目录，例如   ~/cad-private-rules/
+#   2. 把本文件复制为            ~/cad-private-rules/site-adaptations.yaml
+#   3. 启动服务前设置环境变量：
+#        export CAD_PROJECT_RULES_DIR=~/cad-private-rules
+#   4. 该目录已被 .gitignore 覆盖（`docs/*` 之外的私有目录请自行确认不要提交）
+#
+# 占位符（写模式时使用，公共代码负责展开为通用正则）：
+#   {n}        1-3 位数字
+#   {n:02d}    定宽 2 位数字
+#   {n:03d}    定宽 3 位数字
+#   {range}    编号范围写法（如 01~08 / 01-08 / 01）
+#   {sep}      可选分隔符（-、_、空格）
+#
+# 本文件里出现的所有值都是**占位示例**，不是任何真实项目的编号。
+
+version: "1"
+
+# 设备编号：模型名 -> 整串匹配模式（用于把文本/标签识别为某类设备）
+# 模型名可用：ap / camera.fisheye / camera.dome / camera.rear / office_ap
+label_patterns:
+  ap:
+    - "PREFIX-{n}"
+  camera.dome:
+    - "PREFIX-{n}"
+  camera.rear:
+    - "PREFIX-{n}"
+
+# 设备编号范围：模型名 -> 范围模式（用 {range} 占位，组 1 = 前缀，组 2/3 = 起止号）
+label_range_patterns:
+  ap:
+    - "(PREFIX-AP-)({range})"
+  camera.fisheye:
+    - "(PREFIX-YY-)({range})"
+  camera.rear:
+    - "(PREFIX-CAM-)({range})"
+
+# 项目/方案名称关键词：用于区分「主平面图框」与「附带图框/系统图」。
+# 留空表示不把任何字样当作项目名（默认行为）。
+project_name_keywords: []
+
+# 追加到公开规则里的关键词：规则键路径 -> 关键词列表（与 mapping.yaml 合并，只增不改）
+extra_rule_keywords:
+  layer_rules.cable.security:
+    - "示例图层名-摄像机"
+  layer_rules.cable.network:
+    - "示例图层名-网络"
+
+# 追加到"设备/电缆图层关键词"的图层名样式
+extra_layer_keywords:
+  - "示例图层名"
+
+# 追加的"数量注释"正则：键 -> 正则列表（组 1 必须是数量）
+# 用于识别图上以注释形式给出的设备总数（例如"场地AP编号：XX-AP-01~NN"）
+extra_quantity_patterns:
+  ap:
+    - "场地AP[（(]?编号[：:]?PREFIX-AP-0*1[~～]0*(\\d{1,3})"

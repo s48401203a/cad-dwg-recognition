@@ -222,6 +222,23 @@ CAD_ACCESS_TOKEN=<令牌> python backend/server.py --host 0.0.0.0   # 手动指�
 
 在受管目录之外保存的历史项目需要显式授权：设置 `CAD_ALLOWED_PROJECT_ROOTS`（路径分隔符分隔）。未授权时这些项目只读可解析，不会写回本机其它目录。
 
+### 项目专属编号与图层命名（本机私有配置）
+
+有些项目/客户的图纸使用**自己的一套设备编号前缀与图层命名习惯**。这类内容不属于通用解析能力，
+也不在公共代码里硬编码，而是由**本机私有配置**提供：
+
+```bash
+export CAD_PROJECT_RULES_DIR=~/cad-private-rules     # 放私有规则与本适配
+# ~/cad-private-rules/site-adaptations.yaml        # 见模板
+```
+
+模板：`backend/config/examples/site-adaptations.example.yaml`（含占位符说明与各字段示例）。
+
+- **未配置时**：不内置任何供应商/客户前缀，相关匹配分支自然不命中（等价于"没有这项适配"）。
+- **配置后**：设备编号识别、编号范围写法、项目/方案名称关键词、图层名关键词、
+  数量注释正则重新生效。
+- 该目录位于仓库之外，**不随仓库分发**；不要把客户内容填进去后提交。
+
 ### 相关环境变量
 
 | 变量 | 默认 | 说明 |
@@ -235,6 +252,7 @@ CAD_ACCESS_TOKEN=<令牌> python backend/server.py --host 0.0.0.0   # 手动指�
 | `CAD_MAX_UPLOAD_MB` | `512` | 上传大小上限 |
 | `CAD_PARSE_CONCURRENCY` | CPU/2 | 同时进行的解析数 |
 | `CAD_ALLOWED_PROJECT_ROOTS` | 空 | 显式登记的受信项目根目录 |
+| `CAD_PROJECT_RULES_DIR` | 空 | 本机私有规则目录（覆盖 `mapping.yaml`、`profiles/`，并提供 `site-adaptations.yaml`） |
 | `CAD_RUNTIME_ROOT` | `backend/` | 运行期数据根（项目/上传/日志） |
 | `CAD_ENABLE_REPLAY` | 自动探测 | 强制开启/关闭 replay |
 | `CAD_SHARE_TTL_HOURS` | `24` | 分享令牌有效期（小时） |

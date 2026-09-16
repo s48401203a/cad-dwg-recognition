@@ -8,6 +8,8 @@ import { ProjectManager } from "./projectManager.js?v=6";
 import { SceneBuilder } from "./renderer/SceneBuilder.js?v=89";
 import { PlacementStudio } from "./placementStudio.js?v=15";
 
+// 主平面图框的中性标题（与后端 MAIN_PLAN_TITLE 一致，不含项目/方案名）
+const MAIN_PLAN_LABEL = "主平面";
 const LAYER_ORDER_STORAGE_KEY = "cad-layer-card-order-v1";
 const LAYER_VISIBILITY_STORAGE_KEY = "cad-layer-card-visibility-v1";
 const PANEL_SECTION_STATE_STORAGE_KEY = "cad-panel-section-state-v1";
@@ -2135,7 +2137,7 @@ function initFramePreviewPicker() {
     const frame = state.framePreviewMap?.frames?.[Number(target.dataset.frameIndex)];
     if (!frame?.bounds) return;
     if (frame.kind !== "main_plan" || frame.reference_only) {
-      logger.add("WARNING", `${framePreviewTitle(frame)} 是系统/参考图，不能作为仓库主平面；请使用绿色主图或拖拽框选现方案主平面。`);
+      logger.add("WARNING", `${framePreviewTitle(frame)} 是系统/参考图，不能作为仓库主平面；请使用绿色主图或拖拽框选主平面。`);
       return;
     }
     if (frame?.bounds) {
@@ -2250,7 +2252,7 @@ function framePreviewLabel(frame) {
 
 function framePreviewTitle(frame) {
   if (!frame) return "图框";
-  if (frame.kind === "main_plan") return frame.title || "现方案主平面";
+  if (frame.kind === "main_plan") return frame.title || MAIN_PLAN_LABEL;
   if (frame.reference_only || frame.kind === "reference_plan") return frame.title || "参考图";
   return frame.title || framePreviewSystemLabel(frame);
 }

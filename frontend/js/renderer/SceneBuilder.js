@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
+import { CSS2DObject, CSS2DRenderer } from "three/addons/renderers/CSS2DRenderer.js";
 import { CoordMapper } from "./CoordMapper.js";
-import { DeviceFactory } from "./DeviceFactory.js?v=63";
+import { DeviceFactory } from "./DeviceFactory.js?v=64";
 import { AreaRenderer } from "./AreaRenderer.js?v=60";
 import { CableRenderer } from "./CableRenderer.js";
 import { LabelRenderer } from "./LabelRenderer.js";
@@ -59,6 +59,20 @@ export class SceneBuilder {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.05;
+    this.controls.enablePan = true;
+    this.controls.enableRotate = true;
+    this.controls.enableZoom = true;
+    this.controls.screenSpacePanning = true;
+    this.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+    this.controls.mouseButtons.MIDDLE = THREE.MOUSE.DOLLY;
+    this.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
+    this.selectionRoot = new THREE.Group();
+    this.selectionRoot.name = "selection";
+    this.scene.add(this.selectionRoot);
+    this.measureRoot = new THREE.Group();
+    this.measureRoot.name = "measure";
+    this.scene.add(this.measureRoot);
+    this.selectedEntityIds = [];
     this.raycaster = new THREE.Raycaster();
     this.pointer = new THREE.Vector2();
     this.animationClock = new THREE.Clock();
@@ -82,6 +96,7 @@ export class SceneBuilder {
     this.generatedModelFactories = new Map();
     this.loadingModelFactories = new Set();
     this.zoneViewIndex = 0;
+    this.selectedEntityId = null;
     window.__cadScene = this;
     this.init();
   }
@@ -105,6 +120,8 @@ export class SceneBuilder {
   resetGroups() {
     Object.values(this.groups).forEach((g) => this.scene.remove(g));
     this._clearLabelDom();
+    this.selectionRoot?.clear();
+    this.clearMeasureGuides();
     this.groups = {
       shell:            new THREE.Group(), // 仓库建筑（地面+室内结构）
       'shell.outerWall':new THREE.Group(), // 仓库外墙
@@ -133,7 +150,7 @@ export class SceneBuilder {
   _clearLabelDom() {
     const root = this.labelRenderer?.domElement;
     if (!root) return;
-    root.querySelectorAll('[data-cad-label="true"], .label').forEach((element) => element.remove());
+    root.querySelectorAll('[data-cad-label="true"], [data-measure-label="true"], .label').forEach((element) => element.remove());
   }
 
   _deviceGroupKey(type) {
@@ -141,7 +158,7 @@ export class SceneBuilder {
     if (type === 'security.camera.fisheye') return 'device.fisheye';
     if (type === 'security.camera.dome') return 'device.dome';
     if (type.startsWith('security.camera')) return 'device.bullet';
-    if (type === 'network.cabinet' || type === 'network.switch') return 'device.cabinet';
+    if (type === 'network.cabinet' || type === 'network.switch' || type.startsWith('power.') || type === 'lighting.fixture') return 'device.cabinet';
     return 'device.bullet';
   }
 
@@ -203,7 +220,10 @@ export class SceneBuilder {
 
     // P1: 过滤坐标离群设备（IQR × 3 范围外的视为无效）
     const allDevices = semantic.devices || [];
-    const cleanDevices = this._applyLayoutCoverage(this._filterOutliers(allDevices));
+    const filteredDevices = this._filterOutliers(allDevices);
+    const cleanDevices = this.semantic?.drawing_meta?.source === "placement_studio"
+      ? filteredDevices
+      : this._applyLayoutCoverage(filteredDevices);
     const removedCount = allDevices.length - cleanDevices.length;
     if (removedCount > 0) console.warn(`[SceneBuilder] 过滤掉 ${removedCount} 个坐标异常设备`);
 
@@ -334,9 +354,12 @@ export class SceneBuilder {
     const buckets = { weakCurrent: [], cabinet: [], spotlight: [] };
     cables.forEach((cable) => {
       const role = cable.attributes?.layer_role || "";
-      if (role === "cabinet_cable" || cable.type === "cable.cabinet_power") {
+      const type = cable.type || "";
+      if (type === "cable.power" || type === "cable.lighting") {
+        buckets.weakCurrent.push(cable);
+      } else if (role === "cabinet_cable" || type === "cable.cabinet_power") {
         buckets.cabinet.push(cable);
-      } else if (role === "spotlight_cable" || cable.type === "cable.spotlight_power") {
+      } else if (role === "spotlight_cable" || type === "cable.spotlight_power") {
         buckets.spotlight.push(cable);
       } else {
         buckets.weakCurrent.push(cable);
@@ -500,7 +523,7 @@ export class SceneBuilder {
     if (type === "security.camera.fisheye") return "device.fisheye";
     if (type === "security.camera.dome") return "device.dome";
     if (type.startsWith("security.camera")) return "device.bullet";
-    if (type === "network.cabinet" || type === "network.switch") return "device.cabinet";
+    if (type === "network.cabinet" || type === "network.switch" || type.startsWith("power.") || type === "lighting.fixture") return "device.cabinet";
     if (type === "area.lift_platform" || type === "area.dock_platform" || type === "area.parking_yard" || type.startsWith("parking.")) return "vehicles";
     if (type.startsWith("area.")) return "shell";
     if (entity?.type) return this._labelLayerKey(entity.type, null);
@@ -638,7 +661,11 @@ export class SceneBuilder {
         const screen = this._screenFocus(root, temp, projected);
         const screenLimit = priority >= 4 ? 1.06 : priority >= 3 ? 0.94 : priority >= 2 ? 0.78 : 0.62;
         const distanceLimit = priority >= 4 ? modelFar * 1.25 : priority >= 3 ? modelFar * 1.08 : priority >= 2 ? modelFar : modelNear;
-        const visible = layerVisible && this._objectTowerFloorVisible(root) && screen.inFrame && screen.radius <= screenLimit && distance <= distanceLimit;
+        const entityId = root.userData?.entity?.id;
+        const selected = Boolean(entityId) && (entityId === this.selectedEntityId || (this.selectedEntityIds || []).includes(entityId));
+        const placementKept = this.semantic?.drawing_meta?.source === "placement_studio" || Boolean(root.userData?.entity?.attributes?.placement);
+        const visible = layerVisible && this._objectTowerFloorVisible(root)
+          && (selected || placementKept || (screen.inFrame && screen.radius <= screenLimit && distance <= distanceLimit));
         root.visible = visible;
         if (!visible) return;
         const distanceFade = THREE.MathUtils.clamp(1 - (distance - distanceLimit * 0.72) / Math.max(distanceLimit * 0.28, 1), 0.24, 1);
@@ -669,10 +696,12 @@ export class SceneBuilder {
     const entity = root.userData?.entity || {};
     const kind = root.userData?.kind || "";
     const type = entity.type || "";
-    if (type === "network.cabinet" || entity.attributes?.role === "office_aggregation_42u") return 4;
+    if (type === "network.cabinet" || type.startsWith("power.") || entity.attributes?.role === "office_aggregation_42u") return 4;
+    if (type === "lighting.fixture") return 2;
     if (type === "network.ap") return 3;
     if (type === "security.camera.fisheye" || type === "security.camera.dome") return 2;
-    if (kind === "vehicle" || kind === "fixture") return 1;
+    if (kind === "fixture" || type === "lighting.floodlight") return 3;
+    if (kind === "vehicle") return 1;
     if (kind === "parking") return 1;
     if (type.startsWith("security.camera")) return 1;
     return 2;
@@ -765,6 +794,7 @@ export class SceneBuilder {
 
   // IQR×3 离群值过滤
   _filterOutliers(devices) {
+    if (this.semantic?.drawing_meta?.source === "placement_studio") return devices;
     if (devices.length < 6) return devices;
     const xs = devices.map(d => d.geometry?.position?.x ?? 0).sort((a, b) => a - b);
     const ys = devices.map(d => d.geometry?.position?.y ?? 0).sort((a, b) => a - b);
@@ -774,6 +804,7 @@ export class SceneBuilder {
     const iqrX = q3x - q1x, iqrY = q3y - q1y;
     const fence = 3.0;
     return devices.filter(d => {
+      if (d.attributes?.placement) return true;
       const x = d.geometry?.position?.x ?? 0;
       const y = d.geometry?.position?.y ?? 0;
       return x >= q1x - iqrX * fence && x <= q3x + iqrX * fence
@@ -1160,41 +1191,269 @@ export class SceneBuilder {
     };
   }
 
-  pick(event) {
+  pickGround(event) {
+    if (!this.mapper) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const hit = new THREE.Vector3();
+    if (!this.raycaster.ray.intersectPlane(plane, hit)) return null;
+    return this.mapper.fromWorld(hit);
+  }
+
+  pickEntity(event, options = {}) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const skipCoverage = options.skipCoverage !== false;
+    const skipShell = options.skipShell !== false;
     const candidates = [
       this.groups["device.ap"],
       this.groups["device.fisheye"],
       this.groups["device.dome"],
       this.groups["device.bullet"],
       this.groups["device.cabinet"],
-      this.groups.vehicles,
       this.groups.spotlights,
       this.groups.cables,
       this.groups["cables.cabinet"],
       this.groups["cables.spotlight"],
-      this.groups["coverage.ap"],
-      this.groups["coverage.fisheye"],
-      this.groups["coverage.dome"],
-      this.groups["coverage.bullet"],
+      this.groups.vehicles,
       this.groups.shell,
-      this.groups["shell.outerWall"],
     ].filter((group) => group && group.visible);
     const hits = this.raycaster.intersectObjects(candidates, true);
     for (const hit of hits) {
+      if (skipCoverage && this._isCoverageObject(hit.object)) continue;
       let current = hit.object;
       while (current) {
         if (!this._objectVisibleInHierarchy(current)) break;
-        if (current.userData?.selectable) {
-          if (this.onSelect) this.onSelect(current.userData.entity, current.userData.kind);
-          return;
+        const entity = current.userData?.entity;
+        const type = String(entity?.type || "");
+        if (skipShell && type === "area.warehouse.shell") {
+          current = current.parent;
+          continue;
+        }
+        if (skipCoverage && current.userData?.kind === "coverage") {
+          current = current.parent;
+          continue;
+        }
+        if (current.userData?.selectable && entity && current.userData?.kind !== "coverage") {
+          return { object: current, entity, kind: current.userData.kind || "device" };
         }
         current = current.parent;
       }
     }
+    return null;
+  }
+
+  _isCoverageObject(object) {
+    let current = object;
+    while (current) {
+      if (current.userData?.lodKind === "coverage") return true;
+      current = current.parent;
+    }
+    return false;
+  }
+
+  findObjectByEntityId(entityId) {
+    if (!entityId) return null;
+    let found = null;
+    Object.values(this.groups).forEach((group) => {
+      if (found || !group) return;
+      group.traverse((object) => {
+        if (!found && object.userData?.entity?.id === entityId && object.userData?.kind !== "coverage") found = object;
+      });
+    });
+    return found;
+  }
+
+  markSelected(entityOrList) {
+    const list = (Array.isArray(entityOrList) ? entityOrList : (entityOrList ? [entityOrList] : [])).filter((item) => item?.id);
+    this.selectionRoot.clear();
+    this.selectedEntityId = list[0]?.id || null;
+    this.selectedEntityIds = list.map((item) => item.id);
+    if (!this.mapper || !list.length) return;
+    list.forEach((entity) => this._addSelectionMarker(entity));
+    this._updateAdaptiveDetail(true);
+  }
+
+  _addSelectionMarker(entity) {
+    const object = this.findObjectByEntityId(entity.id);
+    const height = Number(entity.attributes?.install_height_m || object?.position?.y || 0);
+    const origin = object
+      ? object.getWorldPosition(new THREE.Vector3())
+      : this.mapper.toVector3(entity.geometry?.position || { x: 0, y: 0 }, height || 0.04);
+    const x = origin.x;
+    const z = origin.z;
+    const lampY = Math.max(origin.y || 0, height || 0);
+    const ringMat = new THREE.MeshBasicMaterial({ color: 0xf4b43a, side: THREE.DoubleSide, transparent: true, opacity: 0.95, depthTest: false });
+    const ground = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.62, 40), ringMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.set(x, 0.08, z);
+    ground.renderOrder = 20;
+    this.selectionRoot.add(ground);
+    if (lampY > 0.3) {
+      const air = new THREE.Mesh(new THREE.RingGeometry(0.28, 0.42, 32), ringMat.clone());
+      air.rotation.x = -Math.PI / 2;
+      air.position.set(x, lampY, z);
+      air.renderOrder = 21;
+      this.selectionRoot.add(air);
+      const stem = new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(x, 0.08, z),
+          new THREE.Vector3(x, lampY, z),
+        ]),
+        new THREE.LineBasicMaterial({ color: 0xf4b43a, transparent: true, opacity: 0.85, depthTest: false }),
+      );
+      stem.renderOrder = 21;
+      this.selectionRoot.add(stem);
+    }
+    if (object) object.visible = true;
+  }
+
+  clearMeasureGuides() {
+    this.measureRoot?.traverse((object) => {
+      if (object.element) object.element.remove();
+    });
+    this.measureRoot?.clear();
+    this.measureParts = [];
+  }
+
+  _measureSpecs(entity, bounds) {
+    const pos = entity.geometry?.position || entity.geometry?.center;
+    if (!pos || !this.mapper || !bounds) return [];
+    const height = Number(entity.attributes?.install_height_m || 0);
+    const origin = this.mapper.toVector3(pos, height);
+    const ground = this.mapper.toVector3(pos, 0);
+    const fmt = (label, meters) => `${label} ${Number(meters).toFixed(2)} m`;
+    return [
+      { start: origin, end: this.mapper.toVector3({ x: bounds.minX, y: pos.y }, height), text: fmt("左", (Number(pos.x) - bounds.minX) / 1000) },
+      { start: origin, end: this.mapper.toVector3({ x: bounds.maxX, y: pos.y }, height), text: fmt("右", (bounds.maxX - Number(pos.x)) / 1000) },
+      { start: origin, end: this.mapper.toVector3({ x: pos.x, y: bounds.minY }, height), text: fmt("前", (Number(pos.y) - bounds.minY) / 1000) },
+      { start: origin, end: this.mapper.toVector3({ x: pos.x, y: bounds.maxY }, height), text: fmt("后", (bounds.maxY - Number(pos.y)) / 1000) },
+      { start: ground, end: origin, text: fmt("高", height) },
+    ];
+  }
+
+  drawMeasureGuides(entity, bounds) {
+    if (!entity || !this.mapper || !bounds) return;
+    const specs = this._measureSpecs(entity, bounds);
+    if (!specs.length) return;
+    if (!this.measureParts?.length || this.measureParts.length !== specs.length) {
+      this.clearMeasureGuides();
+      this.measureParts = specs.map((spec) => this._addMeasureSegment(spec.start, spec.end, spec.text));
+      return;
+    }
+    specs.forEach((spec, index) => this._updateMeasureSegment(this.measureParts[index], spec));
+  }
+
+  _measureSide(start, end) {
+    const dir = end.clone().sub(start);
+    if (dir.lengthSq() < 0.0001) return new THREE.Vector3(0.22, 0, 0);
+    if (Math.abs(dir.y) > Math.abs(dir.x) + Math.abs(dir.z)) return new THREE.Vector3(0.22, 0, 0);
+    return new THREE.Vector3(-dir.z, 0, dir.x).normalize().multiplyScalar(0.22);
+  }
+
+  _addMeasureSegment(start, end, text) {
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xf4b43a, transparent: true, opacity: 0.95, depthTest: false });
+    const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, end]), lineMat);
+    line.renderOrder = 30;
+    this.measureRoot.add(line);
+    const side = this._measureSide(start, end);
+    const tickA = new THREE.Line(new THREE.BufferGeometry().setFromPoints([start.clone().add(side), start.clone().sub(side)]), lineMat);
+    const tickB = new THREE.Line(new THREE.BufferGeometry().setFromPoints([end.clone().add(side), end.clone().sub(side)]), lineMat);
+    tickA.renderOrder = 30;
+    tickB.renderOrder = 30;
+    this.measureRoot.add(tickA, tickB);
+    const labelEl = document.createElement("div");
+    labelEl.className = "measure-line-label";
+    labelEl.dataset.measureLabel = "true";
+    labelEl.textContent = text;
+    const label = new CSS2DObject(labelEl);
+    label.position.copy(start.clone().lerp(end, 0.5));
+    this.measureRoot.add(label);
+    return { line, tickA, tickB, label };
+  }
+
+  _updateMeasureSegment(part, spec) {
+    if (!part?.line || !spec) return;
+    part.line.geometry.setFromPoints([spec.start, spec.end]);
+    part.line.geometry.computeBoundingSphere();
+    const side = this._measureSide(spec.start, spec.end);
+    part.tickA.geometry.setFromPoints([spec.start.clone().add(side), spec.start.clone().sub(side)]);
+    part.tickB.geometry.setFromPoints([spec.end.clone().add(side), spec.end.clone().sub(side)]);
+    part.label.position.copy(spec.start.clone().lerp(spec.end, 0.5));
+    if (part.label.element) part.label.element.textContent = spec.text;
+  }
+
+  findCoverageByEntityId(entityId) {
+    if (!entityId) return null;
+    const keys = ["coverage.ap", "coverage.fisheye", "coverage.dome", "coverage.bullet"];
+    for (const key of keys) {
+      const found = (this.groups[key]?.children || []).find((child) => child.userData?.entity?.id === entityId);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  _isDirectionalCamera(entity) {
+    const type = entity?.type || "";
+    if (!type.startsWith("security.camera")) return false;
+    if (type === "security.camera.fisheye") return false;
+    if (type === "security.camera.dome" && !(Number(entity.coverage?.length_m) > 0)) return false;
+    return true;
+  }
+
+  cadYaw(angleDeg) {
+    return Math.PI + THREE.MathUtils.degToRad(Number(angleDeg || 0));
+  }
+
+  syncPlacementVisual(entity) {
+    if (!entity?.id || !this.mapper) return;
+    const pos = entity.geometry?.position || entity.geometry?.center;
+    if (!pos) return;
+    const world = this.mapper.toVector3(pos, 0);
+    const object = this.findObjectByEntityId(entity.id);
+    if (object) {
+      object.position.x = world.x;
+      object.position.z = world.z;
+      if (this._isDirectionalCamera(entity)) object.rotation.y = this.cadYaw(entity.orientation?.angle_deg);
+    }
+    const coverage = this.findCoverageByEntityId(entity.id);
+    if (!coverage) return;
+    if (coverage.userData.anchoredAtDevice) {
+      coverage.position.x = world.x;
+      coverage.position.z = world.z;
+    } else {
+      const base = coverage.userData.baseWorld || world;
+      coverage.position.x = world.x - base.x;
+      coverage.position.z = world.z - base.z;
+    }
+    if (this._isDirectionalCamera(entity)) coverage.rotation.y = this.cadYaw(entity.orientation?.angle_deg);
+    if (entity.type === "network.ap") {
+      const radius = Number(entity.coverage?.radius_m || entity.attributes?.coverage_radius_m || coverage.userData.baseRadius || 14);
+      const factor = Math.max(0.15, radius / (coverage.userData.baseRadius || 14));
+      coverage.traverse((child) => {
+        if (child.userData?.coveragePart === "downlight_beam") {
+          child.scale.x = factor;
+          child.scale.z = factor;
+        }
+        if (child.userData?.animation === "ap_wifi_ripple") child.userData.radius = radius;
+      });
+    } else if (this._isDirectionalCamera(entity) && coverage.userData.baseLength) {
+      const length = Number(entity.coverage?.length_m || coverage.userData.baseLength);
+      const factor = Math.max(0.15, length / coverage.userData.baseLength);
+      coverage.scale.x = factor;
+      coverage.scale.z = factor;
+    }
+  }
+
+  pick(event) {
+    const picked = this.pickEntity(event);
+    if (picked && this.onSelect) this.onSelect(picked.entity, picked.kind);
+    return picked;
   }
 
   _objectVisibleInHierarchy(object) {
@@ -1242,8 +1501,6 @@ export class SceneBuilder {
       this.groups.labels.visible = this.layerVisibility.labels ?? true;
     }
     this.renderer.render(this.scene, this.camera);
-    if (this.groups.labels?.visible && (this.layerVisibility.labels ?? true)) {
-      this.labelRenderer.render(this.scene, this.camera);
-    }
+    this.labelRenderer.render(this.scene, this.camera);
   }
 }

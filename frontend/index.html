@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CAD DWG 识别 3D 预览工具</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="./css/style.css?v=63" />
+  <link rel="stylesheet" href="./css/style.css?v=73" />
   <script src="./share-config.js?v=1"></script>
   <script type="importmap">
     {
@@ -17,6 +17,32 @@
   </script>
 </head>
 <body>
+  <script>
+    (function () {
+      const id = new URLSearchParams(location.search).get("project") || "";
+      if (id === "proj_2fe23d7bec") document.body.classList.add("placement-studio");
+    })();
+  </script>
+  <div class="auth-overlay" id="authOverlay" hidden>
+    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <h2 id="authTitle">需要访问令牌</h2>
+      <p class="auth-hint" id="authHint">
+        当前服务已启用访问控制（局域网模式或显式令牌）。请输入访问令牌后继续。
+        令牌只保存在本机浏览器，不会写入日志，也不会出现在分享链接中。
+      </p>
+      <label class="auth-field">
+        <span>访问令牌</span>
+        <input id="authTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴启动脚本输出的令牌" />
+      </label>
+      <p class="auth-error" id="authError" hidden></p>
+      <div class="auth-actions">
+        <button id="authSubmitButton" class="primary" type="button">登录</button>
+        <button id="authLogoutButton" type="button" hidden>退出登录</button>
+      </div>
+      <p class="auth-foot" id="authFoot"></p>
+    </div>
+  </div>
+
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
@@ -26,6 +52,7 @@
       <div class="top-actions">
         <input id="fileInput" type="file" accept=".dwg,.dxf" multiple hidden />
         <div class="action-menu" data-action-menu>
+          <button id="logoutButton" class="menu-trigger" type="button" hidden title="清除本机会话与已保存的访问令牌">退出登录</button>
           <button class="menu-trigger" type="button" aria-expanded="false">项目 ▾</button>
           <div class="menu-panel" role="menu">
             <button id="projectButton" type="button" role="menuitem">新建 / 选择项目</button>
@@ -43,12 +70,32 @@
             <button id="shareLinkButton" type="button" role="menuitem" disabled>复制分享链接</button>
           </div>
         </div>
-        <span id="siteProfileSummary" class="profile-summary">场地: 快运</span>
+        <span id="siteProfileSummary" class="profile-summary" role="button" tabindex="0" title="点击选择场地类型" style="cursor:pointer">场地: 通用</span>
       </div>
     </header>
 
     <main class="workspace">
       <aside class="side-panel" id="sidePanel">
+        <section class="panel-section placement-dock hidden" data-panel-section="placement" id="placementDock">
+          <h2 class="section-title">摆放模块 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠摆放模块">▾</button></h2>
+          <div class="placement-current-bar">
+            <strong id="placementCurrentName">试验场</strong>
+            <button type="button" id="placementSwitchProject">切换项目</button>
+          </div>
+          <div class="placement-tools" id="placementTools">
+            <button type="button" data-place-mode="select" aria-pressed="true">选择</button>
+            <button type="button" data-place-mode="box">框选</button>
+            <button type="button" data-place-mode="combo">车尾组合</button>
+            <button type="button" data-place-mode="circuit">射灯回路</button>
+            <button type="button" id="placementFixButton">固定高度</button>
+            <button type="button" id="placementAlignRow">横排</button>
+            <button type="button" id="placementAlignCol">竖排</button>
+            <button type="button" id="placementUndoButton">撤销</button>
+          </div>
+          <p class="placement-hint" id="placementHint">点选设备，拖动物体移动，拖空白处旋转</p>
+          <div class="placement-modules" id="placementModules"></div>
+        </section>
+
         <section class="panel-section project-management-section" data-panel-section="projects">
           <h2 class="section-title">项目管理 <button class="section-toggle" type="button" data-section-toggle aria-expanded="true" title="折叠项目管理">▾</button></h2>
           <div class="project-list" id="projectList"></div>
@@ -185,6 +232,8 @@
 
       <section class="canvas-wrap" id="canvasWrap">
         <canvas id="scene"></canvas>
+        <div id="placementMeasureHud" class="placement-measure-hud hidden" aria-hidden="true"></div>
+        <div id="placementMarquee" class="placement-marquee hidden"></div>
         <button class="fullscreen-toggle" id="fullscreenButton" type="button" aria-pressed="false" title="全屏查看">全屏</button>
         <div class="drop-hint" id="dropHint">
           <strong>等待上传 DWG / DXF 图纸</strong>
@@ -245,11 +294,19 @@
       </section>
 
       <aside class="inspector-panel">
-        <section class="panel-section">
+        <section class="panel-section placement-inspector-section hidden" id="placementInspectorSection">
+          <h2 class="section-title">摆放参数</h2>
+          <div class="placement-instance-wrap">
+            <h3 class="placement-group-label">已放置</h3>
+            <div id="placementInstanceList" class="placement-instance-list"></div>
+          </div>
+          <div id="placementInspector" class="inspector-empty">点选已放的模型后，在这里改高度、位置和朝向。</div>
+        </section>
+        <section class="panel-section cad-inspector-section">
           <h2 class="section-title">对象信息</h2>
           <div id="inspector" class="inspector-empty">点击场景中的设备、区域或线路查看属性。</div>
         </section>
-        <section class="panel-section">
+        <section class="panel-section cad-inspector-section">
           <h2 class="section-title">识别统计</h2>
           <div class="metric-grid">
             <div class="metric"><b id="metricDevices">0</b><span>设备</span></div>
@@ -258,13 +315,13 @@
             <div class="metric"><b id="metricReview">0</b><span>待审核</span></div>
           </div>
         </section>
-        <section class="panel-section">
+        <section class="panel-section cad-inspector-section">
           <h2 class="section-title">待审核列表</h2>
           <div id="reviewList" class="review-list">
             <div class="inspector-empty">暂无待审核条目。</div>
           </div>
         </section>
-        <section class="panel-section">
+        <section class="panel-section cad-inspector-section">
           <h2 class="section-title">图例说明</h2>
           <div class="legend-list">
             <div class="legend-item"><span class="swatch" style="background:var(--violet)"></span><span>鱼眼摄像头</span></div>
@@ -306,17 +363,18 @@
       <header><h2>选择场地类型</h2></header>
       <div class="modal-body">
         <div class="profile-options">
-          <label class="profile-option"><input id="siteProfileExpress" type="checkbox" value="express" checked /><span><strong>快运场地</strong><small>月台、车尾、射灯、AP、鱼眼、半球、机柜</small></span></label>
-          <label class="profile-option"><input id="siteProfileSupplyChain" type="checkbox" value="supply_chain" /><span><strong>仓储供应链场地</strong><small>供应链仓储框架，货架/工位/分拣/DWS 后续启用</small></span></label>
+          <label class="profile-option"><input id="siteProfileGeneric" type="checkbox" value="generic" checked /><span><strong>通用强弱电</strong><small>按图层/块/文字读取墙、桥架、摄像头、AP、机柜、配电、照明</small></span></label>
+          <label class="profile-option"><input id="siteProfileExpress" type="checkbox" value="express" /><span><strong>快运场地</strong><small>月台、车尾、射灯、AP、鱼眼、半球、机柜（可选）</small></span></label>
+          <label class="profile-option"><input id="siteProfileSupplyChain" type="checkbox" value="supply_chain" /><span><strong>仓储供应链场地</strong><small>供应链仓储框架，货架/工位/分拣/DWS 后续启用（可选）</small></span></label>
         </div>
       </div>
       <footer>
         <button id="cancelSiteProfileButton" type="button">取消</button>
-        <button id="confirmSiteProfileButton" class="primary" type="button">确认并上传</button>
+        <button id="confirmSiteProfileButton" class="primary" type="button">确认</button>
       </footer>
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=91"></script>
+  <script type="module" src="./js/app.js?v=111"></script>
 </body>
 </html>

@@ -1,0 +1,163 @@
+# 公开评测用例。合成夹具由 tests/synthetic.py 生成，**不含任何客户数据**。
+# `builder` 指 tests/synthetic.py 的生成器；`dxf` 指仓库内既有的合成图。
+# 本地项目扫描在运行时发现，结果只写到 exports/eval/（不入库）。
+
+version: "2"
+default_profile: generic
+
+cases:
+  - id: generic_electrical_min
+    name: 通用强弱电最小图
+    kind: fixture
+    dxf: tests/fixtures/generic_electrical_min.dxf
+    profile: generic
+    notes: 用行业通用中文图层/块名，不含百世场地编号或炮楼规则。
+    baseline:
+      devices_by_type:
+        security.camera: 1
+        network.ap: 1
+        network.cabinet: 1
+      render_ready: true
+    desired:
+      devices_by_type:
+        security.camera: 1
+        network.ap: 1
+        network.cabinet: 1
+        power.distribution: 1
+        lighting.fixture: 1
+      cables_min: 1
+      structures_min: 1
+      render_ready: true
+      max_specificity: 0.35
+
+  - id: empty_drawing
+    name: 空图（只有图层，没有实体）
+    kind: fixture
+    builder: empty
+    profile: generic
+    notes: 空图必须解析成功、不产生任何对象，也不能崩。
+    baseline:
+      empty: true
+    desired:
+      empty: true
+      devices_min: 0
+      cables_min: 0
+      max_specificity: 0.0
+    geometry:
+      total_entities: 0
+
+  - id: unit_feet
+    name: 英尺单位图（10 ft 应为 3048 mm）
+    kind: fixture
+    builder: unit_scale_line
+    builder_args: {units: 2}
+    profile: generic
+    notes: 单位换算正确性；$INSUNITS=2 时 1 单位 = 304.8 mm。
+    baseline:
+      unit: ft
+      unit_scale_to_mm: 304.8
+    desired:
+      unit: ft
+      unit_scale_to_mm: 304.8
+      unit_unspecified: false
+      has_strong_current: false
+      max_specificity: 0.0
+    geometry:
+      total_entities: 1
+
+  - id: unit_meters
+    name: 米单位图
+    kind: fixture
+    builder: unit_scale_line
+    builder_args: {units: 6}
+    profile: generic
+    baseline:
+      unit: m
+      unit_scale_to_mm: 1000.0
+    desired:
+      unit: m
+      unit_scale_to_mm: 1000.0
+      unit_unspecified: false
+      max_specificity: 0.0
+
+  - id: unit_unspecified
+    name: 无单位图（$INSUNITS=0）
+    kind: fixture
+    builder: unit_scale_line
+    builder_args: {units: 0}
+    profile: generic
+    notes: 无单位不得静默当成毫米：必须标记 unit_unspecified 并给出提示。
+    baseline:
+      unit_unspecified: true
+    desired:
+      unit_unspecified: true
+      max_specificity: 0.0
+
+  - id: bulge_and_closed
+    name: 弧形与闭合多段线
+    kind: fixture
+    builder: bulge
+    profile: generic
+    notes: 凸度弧段与闭合边必须被识别为曲线/闭合几何。
+    baseline:
+      closed_entities_min: 1
+      curved_entities_min: 2
+    desired:
+      closed_entities_min: 1
+      curved_entities_min: 2
+      cables_min: 1
+      structures_min: 1
+      max_specificity: 0.0
+    geometry:
+      curved_entities: 3
+      closed_entities: 1
+
+  - id: block_transform
+    name: 块变换（旋转/镜像/非均匀缩放/嵌套）
+    kind: fixture
+    builder: block_transform
+    profile: generic
+    notes: 变换后的块引用不得导致解析失败或产生越界坐标。
+    desired:
+      devices_min: 0
+      max_specificity: 0.0
+    geometry:
+      block_references: 4
+
+  - id: duplicate_legend
+    name: 重复图例（同设备符号 + 文字标注各两份）
+    kind: fixture
+    builder: duplicate_legend
+    profile: generic
+    notes: 重复图例应被去重，不能按符号+标注重复计数。
+    baseline:
+      devices_by_type:
+        security.camera: 2
+    desired:
+      devices_by_type:
+        security.camera: 2
+      devices_max: 2
+      max_specificity: 0.0
+    geometry:
+      block_references: 2
+
+  - id: unknown_block
+    name: 未知块（不在任何规则内）
+    kind: fixture
+    builder: unknown_block
+    profile: generic
+    notes: 未知块不得被猜测成具体设备；没有建筑结构时也不应崩。
+    desired:
+      devices_max: 0
+      max_specificity: 0.0
+    geometry:
+      block_references: 1
+
+  - id: unsupported_entities
+    name: 含不支持实体类型（SPLINE/POINT）
+    kind: fixture
+    builder: unsupported_entity
+    profile: generic
+    notes: 不支持的类型应被跳过，支持的实体仍要读出来。
+    desired:
+      max_specificity: 0.0

@@ -1,0 +1,16 @@
+id: "generic"
+display_name: "通用强弱电"
+site_type: "generic"
+description: "只按图层/块/文字读取墙、桥架、摄像头、AP、机柜、配电、照明；不启用月台/车尾/炮楼推断。"
+standards_overrides:
+  site:
+    site_type: "generic"
+rule_overrides: {}
+active_modules:
+  - "building.basic"
+  - "cables.native"
+  - "device.camera"
+  - "device.ap"
+  - "device.cabinet"
+  - "device.power"
+  - "device.lighting"

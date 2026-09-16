@@ -1,9 +1,15 @@
+# 启动 CAD 读取器（Windows）。
+#
+# 默认走仓库内自包含启动器 `backend\server.py`：它会挑选空闲端口、生成访问令牌、
+# 写出运行期状态（并额外写出兼容本脚本族系的 .cad-server.json），并且**不会**以
+# 无鉴权状态绑定到局域网地址。
 param(
     [int]$Port = 8000,
     [int]$MaxPort = 8020,
     [switch]$NoBrowser,
     [switch]$SkipProjectApps,
-    [switch]$SyncProjectPackages
+    [switch]$SyncProjectPackages,
+    [switch]$Lan
 )
 
 $ErrorActionPreference = "Stop"
@@ -211,52 +217,72 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python dependencies are incomplete. Please run install-env.ps1."
 }
 
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$stdoutLog = Join-Path $LogDir "server-$timestamp.out.log"
-$stderrLog = Join-Path $LogDir "server-$timestamp.err.log"
-$serverArgs = @($pythonBaseArgs + @("-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "$SelectedPort"))
+$serverLauncher = Join-Path $BackendDir "server.py"
+if (-not (Test-Path -LiteralPath $serverLauncher)) {
+    throw "backend\server.py was not found. It ships with the repository; please re-check the checkout."
+}
 
-Write-Host "Starting CAD service..."
+try {
+    Push-Location $BackendDir
+    & $pythonExe @pythonBaseArgs -m log_retention | Out-Null
+} catch {
+    Write-Warning "Log retention skipped: $($_.Exception.Message)"
+} finally {
+    Pop-Location
+}
+
+# 由 backend\server.py 负责：挑端口、生成令牌、写状态、按需绑定局域网。
+$launcherArgs = @(
+    $pythonBaseArgs +
+    @($serverLauncher, "--port", "$SelectedPort", "--legacy-state") +
+    $(if ($Lan) { @("--lan") } else { @() }) +
+    $(if ($NoBrowser) { @("--no-open") } else { @() })
+)
+
+# Start-Process 会把 -ArgumentList 数组用空格拼接，因此含空格的路径必须显式加引号。
+$quotedArgs = $launcherArgs | ForEach-Object { '"' + ([string]$_ -replace '"', '\"') + '"' }
+
+Write-Host "Starting CAD service (backend\server.py)..."
 $process = Start-Process `
     -FilePath $pythonExe `
-    -ArgumentList $serverArgs `
+    -ArgumentList $quotedArgs `
     -WorkingDirectory $BackendDir `
     -WindowStyle Hidden `
-    -PassThru `
-    -RedirectStandardOutput $stdoutLog `
-    -RedirectStandardError $stderrLog
+    -PassThru
 
-$url = "http://127.0.0.1:{0}" -f $SelectedPort
-$state = [ordered]@{
-    pid = $process.Id
-    port = $SelectedPort
-    url = $url
-    root = $RootDir
-    backend = $BackendDir
-    stdout_log = $stdoutLog
-    stderr_log = $stderrLog
-    started_at = (Get-Date).ToString("s")
-}
-$state | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
-
-for ($i = 0; $i -lt 40; $i++) {
-    if (Test-CadService $SelectedPort) {
-        $listener = Get-PortListener $SelectedPort
-        if ($listener -and $listener.OwningProcess) {
-            $state.pid = [int]$listener.OwningProcess
-            $state | ConvertTo-Json | Set-Content -LiteralPath $StatePath -Encoding UTF8
-        }
-        Write-Host "Started successfully: $url"
-        Write-Host "PID: $($state.pid)"
-        Write-Host "Log file: $stdoutLog"
-        Invoke-ProjectWakeup $pythonInfo
-        Open-CadBrowser $url
-        return
+# 等待启动器写出状态（含端口与访问令牌提示），再轮询健康检查。
+$url = $null
+for ($i = 0; $i -lt 60; $i++) {
+    if (Test-Path -LiteralPath $StatePath) {
+        try {
+            $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+            if ($state.port) {
+                $url = $state.url
+                if (Test-CadService ([int]$state.port)) { break }
+            }
+        } catch {}
     }
     Start-Sleep -Milliseconds 500
 }
 
-Write-Host "Service startup timed out. Please check logs:"
-Write-Host "stdout: $stdoutLog"
-Write-Host "stderr: $stderrLog"
+if (-not $url) {
+    $url = "http://127.0.0.1:{0}" -f $SelectedPort
+}
+
+if (Test-CadService $SelectedPort) {
+    Write-Host "Started successfully: $url"
+    if ($Lan) {
+        Write-Host "LAN mode is ON: an access token was generated and printed by the launcher."
+        Write-Host "Unauthenticated visitors on the LAN cannot read projects or export files."
+    }
+    Invoke-ProjectWakeup $pythonInfo
+    if (-not $NoBrowser) {
+        Open-CadBrowser $url
+    }
+    return
+}
+
+Write-Host "Service startup timed out. Please check the console output above and:"
+Write-Host "  $StatePath"
+Write-Host "  运行 backup 前的日志目录: backend\logs"
 exit 1

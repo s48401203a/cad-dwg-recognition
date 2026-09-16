@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>通用 CAD 强弱电读取 · 评测说明</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --paper: #11161e;
+      --panel: #1b2230;
+      --panel-2: #232c3c;
+      --ink: #e8eef6;
+      --muted: #8e9aab;
+      --line: rgba(232, 238, 246, 0.12);
+      --copper: #c9844a;
+      --live: #2fbfb5;
+      --pass: #6cbf82;
+      --warn: #d4a054;
+      --alert: #de6b62;
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --radius: 12px;
+      --display: "Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --body: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--paper);
+      color: var(--ink);
+    }
+
+    body {
+      margin: 0;
+      font-family: var(--body);
+      line-height: 1.65;
+      background:
+        radial-gradient(1200px 480px at 12% -10%, rgba(201, 132, 74, 0.14), transparent 58%),
+        radial-gradient(900px 420px at 100% 0%, rgba(47, 191, 181, 0.08), transparent 52%),
+        var(--paper);
+    }
+
+    a { color: var(--live); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+    a:hover { color: var(--ink); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 228px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    .bus {
+      position: sticky;
+      top: 0;
+      align-self: start;
+      height: 100vh;
+      padding: 28px 18px 28px 22px;
+      border-right: 1px solid var(--line);
+      background: rgba(17, 22, 30, 0.92);
+    }
+
+    .bus-brand {
+      font-family: var(--display);
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-size: 13px;
+      text-transform: uppercase;
+      color: var(--copper);
+      margin-bottom: 8px;
+    }
+
+    .bus-title {
+      font-family: var(--display);
+      font-size: 18px;
+      font-weight: 700;
+      line-height: 1.3;
+      margin: 0 0 22px;
+    }
+
+    .rail {
+      position: relative;
+      padding-left: 22px;
+    }
+
+    .rail::before {
+      content: "";
+      position: absolute;
+      left: 6px;
+      top: 8px;
+      bottom: 8px;
+      width: 3px;
+      border-radius: 99px;
+      background: linear-gradient(180deg, var(--copper), rgba(201, 132, 74, 0.18));
+    }
+
+    .rail a {
+      position: relative;
+      display: block;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 14px;
+      padding: 9px 0;
+    }
+
+    .rail a::before {
+      content: "";
+      position: absolute;
+      left: -19px;
+      top: 50%;
+      width: 11px;
+      height: 11px;
+      margin-top: -6px;
+      border-radius: 50%;
+      background: var(--paper);
+      border: 2px solid var(--copper);
+    }
+
+    .rail a.is-active {
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .rail a.is-active::before {
+      background: var(--copper);
+      box-shadow: 0 0 0 4px rgba(201, 132, 74, 0.22);
+    }
+
+    .rail a:focus-visible,
+    button:focus-visible,
+    a:focus-visible {
+      outline: 2px solid var(--copper);
+      outline-offset: 3px;
+    }
+
+    main {
+      padding: 36px clamp(20px, 4vw, 56px) 72px;
+      max-width: 920px;
+    }
+
+    .eyebrow {
+      color: var(--copper);
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      margin: 0 0 10px;
+    }
+
+    h1, h2, h3 {
+      font-family: var(--display);
+      line-height: 1.25;
+      margin: 0 0 12px;
+    }
+
+    h1 { font-size: clamp(28px, 4vw, 40px); }
+    h2 { font-size: 26px; margin-top: 8px; }
+    h3 { font-size: 18px; }
+
+    p { margin: 0 0 14px; color: var(--ink); }
+    .lead { font-size: 18px; color: var(--ink); max-width: 42em; }
+
+    section {
+      margin: 0 0 42px;
+      padding-top: 8px;
+    }
+
+    .hero {
+      margin-bottom: 40px;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 18px 0 0;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .chip b { color: var(--ink); font-weight: 650; }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 16px 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h3 { margin-bottom: 8px; }
+    .card p:last-child, .card ul:last-child { margin-bottom: 0; }
+
+    .yes { border-top: 3px solid var(--pass); }
+    .no { border-top: 3px solid var(--alert); }
+
+    ul { margin: 0 0 12px; padding-left: 1.15em; }
+    li { margin: 0 0 6px; }
+
+    .phases {
+      display: grid;
+      gap: 12px;
+    }
+
+    .phase {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr);
+      gap: 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+    }
+
+    .phase-id {
+      font-family: var(--display);
+      font-weight: 800;
+      color: var(--copper);
+      letter-spacing: 0.04em;
+    }
+
+    .phase .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .status {
+      display: inline-block;
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      padding: 2px 8px;
+      border-radius: 999px;
+    }
+
+    .status.done { background: rgba(108, 191, 130, 0.16); color: var(--pass); }
+    .status.open { background: rgba(212, 160, 84, 0.16); color: var(--warn); }
+    .status.now { background: rgba(47, 191, 181, 0.16); color: var(--live); }
+
+    .cmd {
+      position: relative;
+      background: #0c1017;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      margin: 10px 0 18px;
+      overflow: hidden;
+    }
+
+    .cmd header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      padding: 8px 12px;
+      background: var(--panel-2);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .cmd pre {
+      margin: 0;
+      padding: 14px 16px 16px;
+      overflow-x: auto;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      line-height: 1.55;
+      color: #d7e3ef;
+    }
+
+    .copy-btn {
+      appearance: none;
+      border: 1px solid var(--line);
+      background: #151c28;
+      color: var(--ink);
+      border-radius: 8px;
+      padding: 4px 10px;
+      font: 12px/1.3 var(--body);
+      cursor: pointer;
+    }
+
+    .copy-btn:hover { border-color: var(--copper); color: var(--copper); }
+    .copy-btn.ok { color: var(--pass); border-color: var(--pass); }
+    .copy-btn.bad { color: var(--alert); border-color: var(--alert); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      text-align: left;
+      vertical-align: top;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    th {
+      background: #151c28;
+      color: var(--muted);
+      font-weight: 650;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+    }
+
+    code {
+      font-family: var(--mono);
+      font-size: 0.92em;
+      background: rgba(47, 191, 181, 0.1);
+      padding: 0.08em 0.35em;
+      border-radius: 5px;
+    }
+
+    .note {
+      border-left: 3px solid var(--warn);
+      padding: 10px 14px;
+      background: rgba(212, 160, 84, 0.08);
+      border-radius: 0 10px 10px 0;
+      color: var(--ink);
+    }
+
+    footer {
+      color: var(--muted);
+      font-size: 13px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+
+    @media (max-width: 860px) {
+      .layout { grid-template-columns: 1fr; }
+      .bus {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        height: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        padding: 12px 14px;
+      }
+      .bus-title { display: none; }
+      .rail {
+        display: flex;
+        gap: 8px;
+        overflow-x: auto;
+        padding: 4px 0 2px 0;
+      }
+      .rail::before { display: none; }
+      .rail a {
+        flex: 0 0 auto;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel);
+      }
+      .rail a::before { display: none; }
+      .rail a.is-active { background: var(--copper); color: #1a120b; }
+      .grid-2, .phase { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      * { transition: none !important; animation: none !important; }
+    }
+
+    @media print {
+      .bus, .copy-btn { display: none !important; }
+      .layout { display: block; }
+      body { background: #fff; color: #111; }
+      p, li, td, th, .lead, .meta, footer { color: #111; }
+      .card, .phase, .cmd, .table-wrap { box-shadow: none; border-color: #ccc; }
+      .cmd { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="bus" aria-label="章节导航">
+      <div class="bus-brand">CAD Eval Bus</div>
+      <p class="bus-title">通用强弱电读取评测</p>
+      <nav class="rail">
+        <a href="#goals">目标与非目标</a>
+        <a href="#phases">四阶段方案</a>
+        <a href="#run">如何跑评测</a>
+        <a href="#gaps">夹具缺口含义</a>
+        <a href="#baishi">百世 profile</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Generic electrical CAD reader</p>
+        <h1>先读通用图，再按需挂场地包</h1>
+        <p class="lead">
+          本工具是通用 CAD 强弱电 3D 读取器：上传 DWG/DXF → 自动解析 → Three.js 预览。
+          默认 profile 是 <code>generic</code>。百世快运 / 供应链规则是可选场地包，不是仓库默认身份。
+        </p>
+        <div class="chips">
+          <span class="chip"><b>默认</b> generic</span>
+          <span class="chip"><b>可选</b> express / supply_chain</span>
+          <span class="chip"><b>夹具</b> tests/fixtures/generic_electrical_min.dxf</span>
+          <span class="chip"><b>严格门</b> --strict</span>
+        </div>
+      </header>
+
+      <section id="goals">
+        <p class="eyebrow">01</p>
+        <h2>目标与非目标</h2>
+        <div class="grid-2">
+          <article class="card yes">
+            <h3>目标</h3>
+            <ul>
+              <li>读取通用强弱电图纸：墙、桥架、摄像头、AP、机柜、配电、照明。</li>
+              <li>弱电与强电共用同一条解析与 3D 预览链路。</li>
+              <li>默认不依赖某一客户的编号、月台或炮楼规则。</li>
+              <li>用公开合成夹具度量读取能力；客户图纸只留本机。</li>
+              <li>场地规则以 profile 形式可选启用，而不是写死在主路径。</li>
+            </ul>
+          </article>
+          <article class="card no">
+            <h3>非目标</h3>
+            <ul>
+              <li>不是「只服务百世」的内部专盘工具。</li>
+              <li>不把客户 DWG、DXF、<code>semantic.json</code>、项目目录送进 Git。</li>
+              <li>不在文档里写内网地址、本机绝对路径或真实场地编号。</li>
+              <li>不把月台、车尾、炮楼推断当成通用图的必选项。</li>
+              <li>评测夹具不是施工图，也不替代现场验收。</li>
+            </ul>
+          </article>
+        </div>
+      </section>
+
+      <section id="phases">
+        <p class="eyebrow">02</p>
+        <h2>四阶段方案</h2>
+        <p>通用化按四段推进：先能量化，再改默认，再用缺口驱动规则，最后把仓库说明改成开源读取器。</p>
+        <div class="phases">
+          <article class="phase">
+            <div class="phase-id">P1</div>
+            <div>
+              <h3>评测底座</h3>
+              <p>增加公开合成夹具与 <code>tests/eval/runner.py</code>。先回答「通用图读出了什么」，不扫描、不入库客户图纸。</p>
+              <p class="meta">产物：<code>tests/eval/</code>、<code>tests/fixtures/generic_electrical_min.dxf</code></p>
+              <span class="status done">已落地</span>
+            </div>
+          </article>
+          <article class="phase">
+            <div class="phase-id">P2</div>
+            <div>
+              <h3>默认 generic</h3>
+              <p>默认 profile 改为 <code>generic</code>。只按图层 / 块 / 文字读取。月台、车尾、炮楼推断只在 <code>express</code> / <code>supply_chain</code> 启用。</p>
+              <p class="meta">登记：<code>backend/config/profiles/_index.yaml</code></p>
+              <span class="status done">后端默认已切</span>
+            </div>
+          </article>
+          <article class="phase">
+            <div class="phase-id">P3</div>
+            <div>
+              <h3>缺口驱动补规则</h3>
+              <p>夹具里已有配电箱、筒灯、闭合墙线。<code>--strict</code> 把这三类 desired 缺口当作失败，用来逼通用规则，而不是加客户特判。</p>
+              <p class="meta">公开夹具的严格门已通过：配电箱、照明、墙均可识别。</p>
+              <span class="status">已达标</span>
+            </div>
+          </article>
+          <article class="phase">
+            <div class="phase-id">P4</div>
+            <div>
+              <h3>开源说明</h3>
+              <p>README 与本页把产品写成通用 CAD 强弱电读取器。百世规则降为可选 profile。客户图纸永不入库。</p>
+              <p class="meta">本页即第 4 阶段交付物。</p>
+              <span class="status now">本阶段</span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section id="run">
+        <p class="eyebrow">03</p>
+        <h2>如何跑评测</h2>
+        <p>在仓库根目录执行。公开夹具由 runner 按需生成，不含客户数据。报告写到 <code>exports/eval/</code>（该目录不入库）。</p>
+
+        <p>用途：跑公开夹具回归。粘贴位置：仓库根目录终端。基线通过时退出码 <code>0</code>；通用目标缺口只打印 <code>DESIRED_GAP</code>，不因此失败。</p>
+        <div class="cmd">
+          <header>
+            <span>公开夹具（默认 generic）</span>
+            <button type="button" class="copy-btn" data-copy="python tests/eval/runner.py">复制</button>
+          </header>
+          <pre>python tests/eval/runner.py</pre>
+        </div>
+
+        <p>用途：只评公开夹具，不扫描本机已解析项目。适合开源仓与 CI。</p>
+        <div class="cmd">
+          <header>
+            <span>只跑公开夹具</span>
+            <button type="button" class="copy-btn" data-copy="python tests/eval/runner.py --fixtures-only">复制</button>
+          </header>
+          <pre>python tests/eval/runner.py --fixtures-only</pre>
+        </div>
+
+        <p>用途：通用目标严格门。配电 / 照明 / 墙的 desired 缺口也视为失败，退出码 <code>2</code>。不要把客户图当作严格门输入。</p>
+        <div class="cmd">
+          <header>
+            <span>通用目标 --strict</span>
+            <button type="button" class="copy-btn" data-copy="python tests/eval/runner.py --strict">复制</button>
+          </header>
+          <pre>python tests/eval/runner.py --strict</pre>
+        </div>
+
+        <p>用途：夹具 + 严格门，排除本机项目扫描。</p>
+        <div class="cmd">
+          <header>
+            <span>夹具严格门</span>
+            <button type="button" class="copy-btn" data-copy="python tests/eval/runner.py --fixtures-only --strict">复制</button>
+          </header>
+          <pre>python tests/eval/runner.py --fixtures-only --strict</pre>
+        </div>
+
+        <p>用途：用可选快运场地包跑同一张合成夹具，对比 generic 与场地推断。不会改仓库默认 profile。</p>
+        <div class="cmd">
+          <header>
+            <span>可选场地包对照</span>
+            <button type="button" class="copy-btn" data-copy="python tests/eval/runner.py --fixtures-only --profile express">复制</button>
+          </header>
+          <pre>python tests/eval/runner.py --fixtures-only --profile express</pre>
+        </div>
+
+        <p class="note">
+          无参数时 runner 还会扫描本机 <code>backend/projects/</code> 做对照，结果只写本机导出目录。
+          那些项目不能提交。开源评测请加 <code>--fixtures-only</code>。
+        </p>
+      </section>
+
+      <section id="gaps">
+        <p class="eyebrow">04</p>
+        <h2>夹具缺口含义</h2>
+        <p>
+          公开夹具是一张合成最小图：图层名为「墙 / 监控 / 网络 / 弱电柜 / 桥架 / 照明 / 配电 / 强电桥架」，
+          块名为「摄像头 / 无线 AP / 机柜 / 配电箱 / 筒灯」。
+          <strong>缺口表示通用规则还没把这类图元写成语义对象，不是夹具坏了，也不是客户图缺失。</strong>
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>缺口</th>
+                <th>夹具里有什么</th>
+                <th>desired 口径</th>
+                <th>含义</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>配电</td>
+                <td>块 <code>配电箱</code>，图层 <code>配电</code>，另有强电桥架连线</td>
+                <td><code>power.distribution &gt;= 1</code></td>
+                <td>通用读取应识别配电箱 / 配电回路。缺了就说明强电侧还没进设备表。</td>
+              </tr>
+              <tr>
+                <td>照明</td>
+                <td>块 <code>筒灯</code>，图层 <code>照明</code>，文字「照明」</td>
+                <td><code>lighting.fixture &gt;= 1</code></td>
+                <td>通用读取应识别灯具。不要用快运「车尾射灯」规则去凑数。</td>
+              </tr>
+              <tr>
+                <td>墙</td>
+                <td>闭合多段线，图层 <code>墙</code>，约 20m × 15m</td>
+                <td><code>structures_min &gt;= 1</code></td>
+                <td>通用读取应把建筑墙写成结构对象。不要靠仓库外壳推断来代替。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p>
+          基线（不加 <code>--strict</code>）要求摄像头、AP、机柜各 1 个且能出 3D。
+          严格门额外要求配电箱、照明、墙。公开夹具当前两道门都已通过。
+        </p>
+      </section>
+
+      <section id="baishi">
+        <p class="eyebrow">05</p>
+        <h2>百世 profile 如何可选启用</h2>
+        <p>
+          仓库默认是 <code>generic</code>。百世相关能力以场地包存在：<code>express</code>（快运）、<code>supply_chain</code>（仓储供应链）。
+          不启用它们时，解析器不走月台、车尾、炮楼推断。
+        </p>
+        <div class="card">
+          <h3>解析时显式传入</h3>
+          <p>上传完成后，<code>POST /api/parse</code> 带 <code>site_profiles</code>。只读通用图时用 <code>["generic"]</code> 或不传（后端回落到 generic）。</p>
+        </div>
+        <p>用途：需要快运场地推断时启用 <code>express</code>。把 <code>&lt;upload_id&gt;</code> 换成实际上传返回的 <code>file_id</code>。不要提交该请求里的客户文件。</p>
+        <div class="cmd">
+          <header>
+            <span>启用快运场地包</span>
+            <button type="button" class="copy-btn" data-copy='{"file_id":"<upload_id>","site_profiles":["express"]}'>复制</button>
+          </header>
+          <pre>{"file_id":"&lt;upload_id&gt;","site_profiles":["express"]}</pre>
+        </div>
+        <p>用途：快运 + 供应链混合场地。</p>
+        <div class="cmd">
+          <header>
+            <span>混合场地包</span>
+            <button type="button" class="copy-btn" data-copy='{"file_id":"<upload_id>","site_profiles":["express","supply_chain"]}'>复制</button>
+          </header>
+          <pre>{"file_id":"&lt;upload_id&gt;","site_profiles":["express","supply_chain"]}</pre>
+        </div>
+        <p>用途：查看当前登记的场地包。</p>
+        <div class="cmd">
+          <header>
+            <span>列出 profile</span>
+            <button type="button" class="copy-btn" data-copy="GET /api/site-profiles">复制</button>
+          </header>
+          <pre>GET /api/site-profiles</pre>
+        </div>
+        <ul>
+          <li>页面上传弹窗仍可勾选快运 / 供应链；那是可选场地包，不是开源默认身份。</li>
+          <li>评测对照用 <code>--profile express</code>，不要改 <code>cases.yaml</code> 里的默认 <code>generic</code>。</li>
+          <li>本地若还有 <code>baishi-*.yaml</code> 覆盖文件，只留本机，不入库。</li>
+        </ul>
+      </section>
+
+      <footer>
+        本页自包含，可用 file:// 打开。不要把客户图纸、semantic.json 或本机绝对路径贴进文档。
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      function copyText(text) {
+        return new Promise(function (resolve, reject) {
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(resolve).catch(function () {
+              fallbackCopy(text) ? resolve() : reject(new Error("copy"));
+            });
+            return;
+          }
+          fallbackCopy(text) ? resolve() : reject(new Error("copy"));
+        });
+      }
+
+      function fallbackCopy(text) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        document.body.appendChild(area);
+        area.focus();
+        area.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (err) { ok = false; }
+        document.body.removeChild(area);
+        return ok;
+      }
+
+      document.querySelectorAll(".copy-btn").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var text = btn.getAttribute("data-copy") || "";
+          copyText(text).then(function () {
+            btn.textContent = "已复制";
+            btn.classList.add("ok");
+            btn.classList.remove("bad");
+          }).catch(function () {
+            btn.textContent = "复制失败";
+            btn.classList.add("bad");
+            btn.classList.remove("ok");
+          }).then(function () {
+            setTimeout(function () {
+              btn.textContent = "复制";
+              btn.classList.remove("ok", "bad");
+            }, 1400);
+          });
+        });
+      });
+
+      var links = Array.prototype.slice.call(document.querySelectorAll(".rail a"));
+      var sections = links.map(function (link) {
+        return document.querySelector(link.getAttribute("href"));
+      }).filter(Boolean);
+
+      function setActive(id) {
+        links.forEach(function (link) {
+          link.classList.toggle("is-active", link.getAttribute("href") === "#" + id);
+        });
+      }
+
+      if ("IntersectionObserver" in window && sections.length) {
+        var io = new IntersectionObserver(function (entries) {
+          var visible = entries
+            .filter(function (entry) { return entry.isIntersecting; })
+            .sort(function (a, b) { return b.intersectionRatio - a.intersectionRatio; });
+          if (visible[0] && visible[0].target.id) setActive(visible[0].target.id);
+        }, { rootMargin: "-20% 0px -55% 0px", threshold: [0.15, 0.4, 0.7] });
+        sections.forEach(function (section) { io.observe(section); });
+      } else if (sections[0]) {
+        setActive(sections[0].id);
+      }
+    })();
+  </script>
+</body>
+</html>

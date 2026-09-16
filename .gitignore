@@ -1,5 +1,8 @@
 # Local runtime state
 .cad-server.json
+.*.json
+.cad-runtime/
+.tmp-verify/
 .codex-tmp/
 .claude/
 codex/
@@ -12,12 +15,14 @@ backend/uploads/
 backend/projects/
 backend/logs/
 backups/
+archives/
 projects/
 backend/projects-archive/
 
 # Generated CAD / semantic outputs
 *.dwg
 *.dxf
+!tests/fixtures/**/*.dxf
 **/semantic.json
 **/*.semantic.json
 output/replay/
@@ -32,16 +37,12 @@ AGENTS.md
 ENVIRONMENT_SETUP.md
 
 # Keep only the explicitly sanitized documentation asset in this repository
-docs/*
-!docs/assets/
-!docs/assets/demo-sanitized.png
 
 # Customer-specific rules, baselines, and internal automation are retained locally
 backend/config/layer_render_standards.yaml
 backend/config/profiles/baishi-*.yaml
 orchestrator/
 skills/
-tests/
 tools/
 启动反推隔离验证.command
 停止反推隔离验证.command
@@ -52,6 +53,7 @@ stop-project.command
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 .venv/
 venv/
@@ -61,6 +63,10 @@ wheelhouse/
 node_modules/
 dist/
 build/
+.vite/
+.vite-dev.pid
+.vite-dev.url
+.vite-api.target
 
 # Logs and local env
 *.log
@@ -74,16 +80,20 @@ PROGRESS.md
 启动说明.md
 
 # Screenshots and images: keep only the sanitized demo image
+
+# ---------------------------------------------------------------------------
+# 文档与图片：仓库只跟踪"公开文档 + 由本仓库代码生成的演示图"。
+# docs/ 下其余内容（内部评审报告等）保持本地，不因"文档齐全"而公开。
+# 说明：gitignore 后出现的规则覆盖先出现的，因此"忽略图片"必须写在
+# "保留演示图"之前。
+# 生成演示图：python tools_docs/make_demo_screenshots.py
+# ---------------------------------------------------------------------------
+docs/*
 *.png
 *.jpg
 *.jpeg
 *.gif
-!docs/
+!docs/generic-cad-eval.html
 !docs/assets/
-!docs/assets/demo-sanitized.png
-
-# OS / editor files
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+!docs/assets/demo-scene.png
+!docs/assets/demo-export.png

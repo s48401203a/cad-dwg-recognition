@@ -145,6 +145,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "Python dependencies are incomplete. Please run install-env.ps1."
 }
 
+try {
+    Push-Location $BackendDir
+    & $pythonExe @pythonBaseArgs -m log_retention | Out-Null
+} catch {
+    Write-Warning "Log retention skipped: $($_.Exception.Message)"
+} finally {
+    Pop-Location
+}
+
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $stdoutLog = Join-Path $LogDir "server-$timestamp.out.log"
 $stderrLog = Join-Path $LogDir "server-$timestamp.err.log"

@@ -26,6 +26,13 @@ export class CoordMapper {
     return new THREE.Vector3(mapped.x, y + this.floorHeight, mapped.z);
   }
 
+  fromWorld(vec) {
+    return {
+      x: (vec?.x || 0) / this.scale + this.center.x,
+      y: -(vec?.z || 0) / this.scale + this.center.y,
+    };
+  }
+
   pointsToVectors(points, y = 0) {
     return (points || []).map((point) => this.toVector3(point, y));
   }

@@ -1,8 +1,15 @@
-import { api } from "./api.js?v=52";
-import { Logger } from "./logger.js";
-import { ProjectManager } from "./projectManager.js?v=4";
-import { SceneBuilder } from "./renderer/SceneBuilder.js?v=82";
+import { api, captureAccessToken, accessToken, forgetAccessToken, onAuthRequired } from "./api.js?v=54";
 
+// 启动脚本可能通过 ?token=... 传入访问令牌（局域网模式必须）。
+// 必须在 Logger 连接 WebSocket 之前完成，否则 WS 会以无令牌状态握手而被拒绝。
+captureAccessToken();
+import { Logger } from "./logger.js";
+import { ProjectManager } from "./projectManager.js?v=6";
+import { SceneBuilder } from "./renderer/SceneBuilder.js?v=89";
+import { PlacementStudio } from "./placementStudio.js?v=15";
+
+// 主平面图框的中性标题（与后端 MAIN_PLAN_TITLE 一致，不含项目/方案名）
+const MAIN_PLAN_LABEL = "主平面";
 const LAYER_ORDER_STORAGE_KEY = "cad-layer-card-order-v1";
 const LAYER_VISIBILITY_STORAGE_KEY = "cad-layer-card-visibility-v1";
 const PANEL_SECTION_STATE_STORAGE_KEY = "cad-panel-section-state-v1";
@@ -45,7 +52,8 @@ const state = {
   project: null,
   projectSource: "auto",
   semantic: null,
-  siteProfiles: ["express"],
+  siteProfiles: ["generic"],
+  siteProfilesExplicit: false,
   siteProfileResolve: null,
   progressHideTimer: null,
   parsePromptTimer: null,
@@ -59,6 +67,8 @@ const state = {
   framePanelHidden: true,
   layerControlsTouched: false,
   performanceProfileKey: null,
+  loadGeneration: 0,
+  frameViewFiltersByProject: {},
 };
 
 const dom = {
@@ -73,6 +83,7 @@ const dom = {
   openSourceFileButton: document.getElementById("openSourceFileButton"),
   siteProfileSummary: document.getElementById("siteProfileSummary"),
   siteProfileModal: document.getElementById("siteProfileModal"),
+  siteProfileGeneric: document.getElementById("siteProfileGeneric"),
   siteProfileExpress: document.getElementById("siteProfileExpress"),
   siteProfileSupplyChain: document.getElementById("siteProfileSupplyChain"),
   confirmSiteProfileButton: document.getElementById("confirmSiteProfileButton"),
@@ -134,11 +145,22 @@ const dom = {
 };
 
 const logger = new Logger(dom.logPanel);
-logger.connect();
+// 注意：这里**不**立刻连接日志通道。启用访问令牌时未认证的 WebSocket 握手会被拒绝，
+// 而浏览器的握手失败会在 console 里留下 error。改到认证完成后由 init() 调用。
 logger.onLine((line) => syncProgressFromLog(line));
 
 const scene = new SceneBuilder(dom.scene, dom.canvasWrap);
 scene.onSelect = (entity, kind) => renderInspector(entity, kind);
+
+const placement = new PlacementStudio({
+  api,
+  scene,
+  logger,
+  getProject: () => state.project,
+  applySemantic: (semantic, options = {}) => applySemantic(semantic, options),
+  onStatus: () => {},
+});
+placement.attach();
 
 const reverseValidationMode = isReverseValidationMode();
 const initialProjectTarget = getInitialProjectTarget();
@@ -155,10 +177,191 @@ const projectManager = new ProjectManager({
   scopeProjectId: initialProjectTarget?.scoped ? initialProjectTarget.projectId : null,
 });
 
+// ---------------------------------------------------------------- 访问令牌认证
+//
+// 服务启用访问令牌（或局域网模式）后，所有 /api/**（白名单除外）与 /exports/** 都需要认证。
+// 这里负责：探测会话状态、在需要时弹出登录界面、登录成功后重新加载数据。
+// 令牌本身只保存在 localStorage（以及服务端的 HttpOnly 会话 cookie），不写入日志或分享链接。
+
+const authState = {
+  required: false,
+  authenticated: true,
+  overlay: null,
+  input: null,
+  error: null,
+  submit: null,
+  logout: null,
+  hint: null,
+  bootstrapped: false,
+};
+
+function authElements() {
+  return {
+    overlay: document.getElementById("authOverlay"),
+    input: document.getElementById("authTokenInput"),
+    error: document.getElementById("authError"),
+    submit: document.getElementById("authSubmitButton"),
+    logout: document.getElementById("authLogoutButton"),
+    hint: document.getElementById("authHint"),
+  };
+}
+
+function showAuthError(message) {
+  const { error } = authElements();
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+async function bootstrapAuth() {
+  const { overlay, input, submit, logout, hint } = authElements();
+  authState.overlay = overlay;
+  authState.input = input;
+  authState.error = document.getElementById("authError");
+  authState.submit = submit;
+  authState.logout = logout;
+  authState.hint = hint;
+
+  let session;
+  try {
+    session = await api.authSession();
+  } catch (error) {
+    // 认证接口不可用时按"无需认证"处理，避免把本地模式锁死。
+    logger.add("WARNING", `无法确认认证状态: ${error.message}`);
+    authState.required = false;
+    authState.authenticated = true;
+    return true;
+  }
+
+  authState.required = Boolean(session.auth_required);
+  authState.authenticated = Boolean(session.authenticated);
+  if (logout) logout.hidden = !authState.required;
+  const topbarLogout = document.getElementById("logoutButton");
+  if (topbarLogout) topbarLogout.hidden = !authState.required;
+
+  if (!authState.required) {
+    if (overlay) overlay.hidden = true;
+    return true;
+  }
+
+  // 已有存储令牌但会话未建立：先尝试用令牌完成登录（例如刚由启动脚本带 ?token= 打开）。
+  if (!authState.authenticated && accessToken()) {
+    try {
+      await api.authLogin(accessToken());
+      authState.authenticated = true;
+    } catch {
+      forgetAccessToken();
+    }
+  }
+
+  if (authState.authenticated) {
+    if (overlay) overlay.hidden = true;
+    return true;
+  }
+
+  showAuthOverlay();
+  return false;
+}
+
+function showAuthOverlay() {
+  if (!authState.overlay) return;
+  authState.overlay.hidden = false;
+  showAuthError("");
+  if (authState.hint && !authState.hint.dataset.filled) {
+    const scope = window.location.origin;
+    authState.hint.dataset.filled = "1";
+    authState.hint.innerHTML =
+      "当前服务已启用访问控制（局域网模式或显式令牌）。请输入访问令牌后继续。" +
+      '<br />令牌只保存在本机浏览器，不写入日志，也不会出现在分享链接中。' +
+      `<br />当前地址：<code>${escapeHtml(scope)}</code>`;
+  }
+  window.setTimeout(() => authState.input?.focus(), 30);
+}
+
+function bindAuthEvents() {
+  const { submit, input, logout } = authElements();
+  authState.submit = submit;
+  authState.input = input;
+  authState.logout = logout;
+
+  const doLogin = async () => {
+    const value = (authState.input?.value || "").trim();
+    if (!value) {
+      showAuthError("请输入访问令牌");
+      return;
+    }
+    if (authState.submit) authState.submit.disabled = true;
+    showAuthError("");
+    try {
+      await api.authLogin(value);
+      try {
+        window.localStorage.setItem("cad_access_token", value);
+      } catch {
+        /* localStorage 不可用时仅依赖会话 cookie */
+      }
+      authState.authenticated = true;
+      if (authState.overlay) authState.overlay.hidden = true;
+      if (authState.input) authState.input.value = "";
+      logger.add("SUCCESS", "已通过访问令牌认证");
+      await loadAuthenticatedData();
+    } catch (error) {
+      forgetAccessToken();
+      logger.disconnect();
+      showAuthError(error.message || "登录失败，请检查访问令牌");
+      if (authState.overlay) authState.overlay.hidden = false;
+    } finally {
+      if (authState.submit) authState.submit.disabled = false;
+    }
+  };
+
+  const topbarLogout = document.getElementById("logoutButton");
+  const doLogout = async () => {
+    try {
+      await api.authLogout();
+    } catch {
+      /* 退出失败也继续清理本地状态 */
+    }
+    forgetAccessToken();
+    logger.disconnect();
+    authState.authenticated = false;
+    showAuthOverlay();
+    if (authState.input) authState.input.value = "";
+  };
+
+  authState.submit?.addEventListener("click", doLogin);
+  topbarLogout?.addEventListener("click", doLogout);
+  authState.input?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      doLogin();
+    }
+  });
+  authState.logout?.addEventListener("click", doLogout);
+
+  // 任何请求返回 401 时回到登录界面，凭据错误或过期都能恢复。
+  // 但不要清掉正在显示的错误提示，否则用户看不到"令牌不正确"这类反馈。
+  onAuthRequired(() => {
+    authState.authenticated = false;
+    const errorNode = document.getElementById("authError");
+    const hasVisibleError = errorNode && !errorNode.hidden && (errorNode.textContent || "").trim();
+    if (hasVisibleError) {
+      if (authState.overlay) authState.overlay.hidden = false;
+      return;
+    }
+    showAuthOverlay();
+  });
+}
+
 init();
 
 async function init() {
   document.body.classList.toggle("reverse-validation-mode", reverseValidationMode);
+  bindAuthEvents();
+  const authenticated = await bootstrapAuth();
+  if (!authenticated) {
+    logger.add("WARNING", "需要访问令牌：请在上方输入后继续");
+    return;
+  }
   restoreLayerPreferences();
   applySavedDisplayMode();
   applySavedFramePanelState();
@@ -169,6 +372,13 @@ async function init() {
   if (reverseValidationMode && !initialProjectTarget) {
     renderReverseValidationLanding();
   }
+  await loadAuthenticatedData();
+}
+
+/** 登录成功后（或无需认证时）加载服务状态与项目列表。 */
+async function loadAuthenticatedData() {
+  // 认证已通过（或本机无需认证），此时再建立日志通道。
+  logger.connect();
   try {
     const health = await api.health();
     logger.add("SUCCESS", `服务就绪，ODA ${health.oda_available ? "可用" : "未检测到"}`);
@@ -190,16 +400,16 @@ function initializeLayerVisibilityFromInputs() {
 }
 
 function bindEvents() {
-  dom.uploadButton.addEventListener("click", async () => {
-    if (reverseValidationMode && !state.project) {
-      const selected = await ensureSiteProfilesSelected({ forceModal: true });
-      if (selected) dom.fileInput.click();
-      return;
+  dom.uploadButton.addEventListener("click", () => {
+    ensureDefaultSiteProfiles();
+    dom.fileInput.click();
+  });
+  dom.siteProfileSummary?.addEventListener("click", () => openSiteProfileModal());
+  dom.siteProfileSummary?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      openSiteProfileModal();
     }
-    const project = await ensureWritableProjectSelected();
-    if (!project) return;
-    const selected = await ensureSiteProfilesSelected({ forceModal: true });
-    if (selected) dom.fileInput.click();
   });
   dom.fileInput.addEventListener("change", () => uploadFiles([...dom.fileInput.files]));
   dom.projectButton.addEventListener("click", async () => {
@@ -729,17 +939,71 @@ async function refreshProjects({ autoLoadLatest = false, preferredProjectId = nu
   }
 }
 
+function snapshotLayerVisibility() {
+  const visibility = {};
+  document.querySelectorAll("[data-layer]").forEach((input) => {
+    visibility[input.dataset.layer] = Boolean(input.checked);
+  });
+  return visibility;
+}
+
+function restoreLayerVisibility(visibility) {
+  if (!visibility || typeof visibility !== "object") return;
+  document.querySelectorAll("[data-layer]").forEach((input) => {
+    const key = input.dataset.layer;
+    if (!Object.prototype.hasOwnProperty.call(visibility, key)) return;
+    input.checked = Boolean(visibility[key]);
+    scene.setLayerVisibility(key, input.checked);
+  });
+  syncLayerCardControls();
+}
+
+function beginProjectSession(project) {
+  if (state.project?.id && state.frameViewFilters && Object.keys(state.frameViewFilters).length) {
+    state.frameViewFiltersByProject[state.project.id] = { ...state.frameViewFilters };
+  }
+  state.loadGeneration += 1;
+  state.uploads = [];
+  state.semantic = null;
+  state.frameViewFilters = {};
+  placement.reset();
+  scene.resetGroups();
+  scene.semantic = null;
+  scene.mapper = null;
+  if (dom.inspector) {
+    dom.inspector.className = "inspector-empty";
+    dom.inspector.textContent = "点击场景中的设备、区域或线路查看属性。";
+  }
+  if (dom.reviewList) dom.reviewList.innerHTML = `<div class="inspector-empty">暂无待审核条目。</div>`;
+  if (dom.drawingList) dom.drawingList.innerHTML = "";
+  projectManager.setActive(project?.id);
+  return state.loadGeneration;
+}
+
 async function loadProject(project, { auto = false, drawingId = null } = {}) {
+  const layerSnapshot = snapshotLayerVisibility();
+  const generation = beginProjectSession(project);
   setProject(project, auto ? "auto" : "manual");
   try {
+    const studio = await placement.ensureForProject(project);
+    if (generation !== state.loadGeneration) return;
+    if (studio) {
+      const refreshed = await api.getProject(project.id);
+      if (generation !== state.loadGeneration) return;
+      setProject(refreshed, auto ? "auto" : "manual");
+      project = refreshed;
+    }
     const exported = await api.exportProject(project.id, { drawing_id: drawingId || project.current_drawing_id });
+    if (generation !== state.loadGeneration) return;
     const currentDrawingId = drawingId || exported.current_drawing_id || exported.project?.current_drawing_id;
     const semantic = exported.schema_version
       ? exported
       : (exported.drawings || []).find((drawing) => drawing.project?.drawing_id === currentDrawingId) || exported.drawings?.[0];
-    if (semantic) applySemantic(semantic, { updateProgress: false });
+    if (semantic) applySemantic(semantic, { updateProgress: false, preserveLayers: true });
+    restoreLayerVisibility(layerSnapshot);
     logger.add("SUCCESS", `${auto ? "已自动加载最近项目" : "已加载项目"} ${project.name}`);
   } catch (error) {
+    if (generation !== state.loadGeneration) return;
     logger.add("ERROR", `项目加载失败: ${error.message}`);
   }
 }
@@ -761,10 +1025,7 @@ function applyProjectData(exported, options = {}) {
 async function uploadFiles(files) {
   if (!files.length) return;
   hideUploadParsePrompt();
-  const project = await ensureWritableProjectSelected(defaultProjectNameForFiles(files));
-  if (!project) return;
-  const selected = await ensureSiteProfilesSelected();
-  if (!selected) return;
+  ensureDefaultSiteProfiles();
   dom.uploadButton.disabled = true;
   resetParseProgress();
   setParseProgress("upload", `准备上传 ${files.length} 个文件`);
@@ -777,9 +1038,10 @@ async function uploadFiles(files) {
       logger.add("SUCCESS", result.message || `${file.name} 已上传`);
     }
     renderDrawingList();
-    dom.parseButton.disabled = state.uploads.length === 0 || isCurrentProjectArchived();
-    completeParseProgress("上传完成，等待解析");
-    showUploadParsePrompt();
+    dom.parseButton.disabled = state.uploads.length === 0;
+    setParseProgress("upload", "上传完成，正在自动解析");
+    logger.add("INFO", "上传完成，开始自动解析并生成 3D");
+    await parseUploads();
   } catch (error) {
     failParseProgress(`上传失败: ${error.message}`);
     logger.add("ERROR", `上传失败: ${error.message}`);
@@ -792,15 +1054,16 @@ async function uploadFiles(files) {
 async function parseUploads() {
   if (!state.uploads.length) return;
   hideUploadParsePrompt();
-  if (isCurrentProjectArchived()) {
-    logger.add("ERROR", "当前项目已归档，只能只读查看；请恢复或新建项目后再解析");
-    return;
-  }
   const selected = await ensureSiteProfilesSelected();
   if (!selected) return;
   let batchProject = await ensureWritableProjectSelected(defaultProjectName());
   if (!batchProject) return;
-  logger.add("INFO", `本批 ${state.uploads.length} 张图纸将写入同一项目: ${batchProject.name}`);
+  const siteProfiles = currentSiteProfiles();
+  if (isCurrentProjectArchived()) {
+    logger.add("ERROR", "当前项目已归档，只能只读查看；请恢复或新建项目后再解析");
+    return;
+  }
+  logger.add("INFO", `本批 ${state.uploads.length} 张图纸将写入同一项目: ${batchProject.name}（${siteProfiles.map(profileDisplayName).join(" + ")}）`);
 
   dom.parseButton.disabled = true;
   resetParseProgress();
@@ -812,7 +1075,7 @@ async function parseUploads() {
         file_id: upload.file_id,
         project_id: batchProject.id,
         save_dir: batchProject.save_dir,
-        site_profiles: state.siteProfiles,
+        site_profiles: siteProfiles,
       });
       applySemantic(semantic, { updateProgress: true });
       batchProject = state.project || batchProject;
@@ -860,7 +1123,7 @@ function applySemantic(semantic, options = {}) {
   }
   applyScenePerformanceProfile(semantic);
   initializeFrameViewFilters(semantic);
-  loadSemanticForFrameViews({ preserveView: false });
+  loadSemanticForFrameViews({ preserveView: Boolean(options.preserveView) });
   dom.dropHint.classList.add("hidden");
   renderFrameDetection(semantic);
   renderStats(semantic);
@@ -873,10 +1136,10 @@ function applySemantic(semantic, options = {}) {
         save_dir: semantic.project.save_dir,
         status: semantic.project.status || "active",
         site_profiles: semantic.project.site_profiles || semantic.site_profiles || state.siteProfiles,
-        drawings: semantic.project.drawings || state.project?.drawings || [],
+        drawings: semantic.project.drawings || [],
         current_drawing_id: semantic.project.current_drawing_id || semantic.project.drawing_id,
       },
-      "parsed",
+      state.projectSource === "auto" ? "auto" : "parsed",
     );
   }
   syncProjectActionButtons();
@@ -884,14 +1147,17 @@ function applySemantic(semantic, options = {}) {
 
 function initializeFrameViewFilters(semantic) {
   const frames = semanticFrames(semantic);
-  const savedFilters = readStorageObject(FRAME_VIEW_FILTER_STORAGE_KEY) || {};
+  const projectId = semantic?.project?.id || state.project?.id || "";
+  const memory = projectId ? state.frameViewFiltersByProject[projectId] : null;
   const filters = {};
   frames.forEach((frame) => {
     const key = frameViewKey(frame);
-    if (key) filters[key] = Object.prototype.hasOwnProperty.call(savedFilters, key) ? Boolean(savedFilters[key]) : true;
+    if (!key) return;
+    filters[key] = memory && Object.prototype.hasOwnProperty.call(memory, key) ? Boolean(memory[key]) : true;
   });
-  if (!Object.keys(filters).length) filters.main_plan = Object.prototype.hasOwnProperty.call(savedFilters, "main_plan") ? Boolean(savedFilters.main_plan) : true;
+  if (!Object.keys(filters).length) filters.main_plan = memory?.main_plan !== false;
   state.frameViewFilters = filters;
+  if (projectId) state.frameViewFiltersByProject[projectId] = { ...filters };
 }
 
 function hasRenderableCoverage(device) {
@@ -1010,6 +1276,7 @@ function frameViewKey(frame) {
 function setProject(project, source = "manual") {
   state.project = project;
   state.projectSource = source;
+  projectManager.setActive(project?.id);
   dom.projectTitle.textContent = project.name || "CAD 弱电图纸 3D 预览";
   if (Array.isArray(project.site_profiles) && project.site_profiles.length) {
     state.siteProfiles = project.site_profiles;
@@ -1110,7 +1377,7 @@ async function reparseCurrentProject(event) {
   const drawingId = state.semantic?.project?.drawing_id || state.project?.current_drawing_id || null;
   const payload = {
     drawing_id: drawingId,
-    site_profiles: state.siteProfiles,
+    site_profiles: currentSiteProfiles(),
     force_main_frame: bbox ? { kind: "manual", bbox } : false,
   };
   dom.reparseButton.disabled = true;
@@ -1305,15 +1572,29 @@ function handleProjectMutation(project, action) {
   syncProjectActionButtons();
 }
 
+function ensureDefaultSiteProfiles() {
+  if (Array.isArray(state.siteProfiles) && state.siteProfiles.length) return state.siteProfiles;
+  state.siteProfiles = ["generic"];
+  renderSiteProfileSummary();
+  return state.siteProfiles;
+}
+
+function currentSiteProfiles() {
+  return [...ensureDefaultSiteProfiles()];
+}
+
 async function ensureSiteProfilesSelected({ forceModal = false } = {}) {
+  ensureDefaultSiteProfiles();
   if (!forceModal && state.siteProfiles.length) return true;
   return openSiteProfileModal();
 }
 
 function openSiteProfileModal() {
   if (!dom.siteProfileModal) return Promise.resolve(true);
-  dom.siteProfileExpress.checked = state.siteProfiles.includes("express");
-  dom.siteProfileSupplyChain.checked = state.siteProfiles.includes("supply_chain");
+  const selected = ensureDefaultSiteProfiles();
+  if (dom.siteProfileGeneric) dom.siteProfileGeneric.checked = selected.includes("generic");
+  if (dom.siteProfileExpress) dom.siteProfileExpress.checked = selected.includes("express");
+  if (dom.siteProfileSupplyChain) dom.siteProfileSupplyChain.checked = selected.includes("supply_chain");
   dom.siteProfileModal.classList.add("open");
   return new Promise((resolve) => {
     state.siteProfileResolve = resolve;
@@ -1322,6 +1603,7 @@ function openSiteProfileModal() {
 
 function confirmSiteProfiles() {
   const selected = [];
+  if (dom.siteProfileGeneric?.checked) selected.push("generic");
   if (dom.siteProfileExpress?.checked) selected.push("express");
   if (dom.siteProfileSupplyChain?.checked) selected.push("supply_chain");
   if (!selected.length) {
@@ -1329,6 +1611,7 @@ function confirmSiteProfiles() {
     return;
   }
   state.siteProfiles = selected;
+  state.siteProfilesExplicit = true;
   renderSiteProfileSummary();
   closeSiteProfileModal(true);
 }
@@ -1354,7 +1637,7 @@ async function createReverseValidationProject(defaultName = defaultProjectName()
   const name = buildReverseValidationProjectName(defaultName);
   try {
     logger.add("INFO", `正在创建独立验证项目: ${name}`);
-    const project = await api.createProject({ name, save_dir: null, site_profiles: state.siteProfiles });
+    const project = await api.createProject({ name, save_dir: null, site_profiles: currentSiteProfiles() });
     setProject(project, "validation");
     await projectManager.refresh(loadProject);
     logger.add("SUCCESS", `已创建独立验证项目 ${project.name}`);
@@ -1380,6 +1663,7 @@ function buildReverseValidationProjectName(defaultName = defaultProjectName()) {
 
 function profileDisplayName(profile) {
   return {
+    generic: "通用",
     express: "快运",
     supply_chain: "供应链",
   }[profile] || profile;
@@ -1551,19 +1835,49 @@ async function ensureWritableProjectSelected(defaultName = defaultProjectName())
   if (state.project && state.projectSource !== "auto" && !isCurrentProjectArchived()) {
     return state.project;
   }
+  if (
+    initialProjectTarget?.scoped
+    && state.project?.id === initialProjectTarget.projectId
+    && !isCurrentProjectArchived()
+  ) {
+    return state.project;
+  }
   if (reverseValidationMode && !initialProjectTarget) {
     return createReverseValidationProject(defaultName);
   }
   if (isCurrentProjectArchived()) {
-    logger.add("WARNING", "当前项目已归档，请选择活动项目或新建项目后再上传");
+    logger.add("WARNING", "当前项目已归档，将新建项目后再解析");
   } else if (state.projectSource === "auto") {
-    logger.add("INFO", "上传前请确认保存位置，避免把新图纸写入自动加载的历史项目");
+    logger.add("INFO", "当前是自动加载的历史项目，将新建项目以免写入历史图纸");
   } else {
-    logger.add("INFO", "请先新建或选择一个项目，随后再上传 DWG/DXF 图纸");
+    logger.add("INFO", "未选择项目，将按图纸名自动创建项目");
   }
-  const project = await projectManager.open(defaultName);
-  if (project) setProject(project, "manual");
-  return project;
+  return createUploadTargetProject(defaultName);
+}
+
+function siteProfilesForNewProject() {
+  if (state.siteProfilesExplicit && state.siteProfiles.length) {
+    return [...state.siteProfiles];
+  }
+  state.siteProfiles = ["generic"];
+  renderSiteProfileSummary();
+  return ["generic"];
+}
+
+async function createUploadTargetProject(defaultName = defaultProjectName()) {
+  const name = String(defaultName || "未命名弱电项目").replace(/\s+/g, " ").trim() || "未命名弱电项目";
+  const siteProfiles = siteProfilesForNewProject();
+  try {
+    logger.add("INFO", `正在创建项目: ${name}`);
+    const project = await api.createProject({ name, save_dir: null, site_profiles: siteProfiles });
+    setProject(project, "created");
+    await projectManager.refresh(loadProject);
+    logger.add("SUCCESS", `已创建项目 ${project.name}`);
+    return project;
+  } catch (error) {
+    logger.add("ERROR", `项目创建失败: ${error.message}`);
+    return null;
+  }
 }
 
 function defaultProjectNameForFiles(files) {
@@ -1792,7 +2106,7 @@ function renderFrameSwitches(frames) {
     input.addEventListener("change", () => {
       state.frameViewFilters[key] = input.checked;
       label.classList.toggle("off", !input.checked);
-      localStorage.setItem(FRAME_VIEW_FILTER_STORAGE_KEY, JSON.stringify(state.frameViewFilters));
+      if (state.project?.id) state.frameViewFiltersByProject[state.project.id] = { ...state.frameViewFilters };
       loadSemanticForFrameViews({ preserveView: true });
       renderFrameSwitches(frames);
     });
@@ -1823,7 +2137,7 @@ function initFramePreviewPicker() {
     const frame = state.framePreviewMap?.frames?.[Number(target.dataset.frameIndex)];
     if (!frame?.bounds) return;
     if (frame.kind !== "main_plan" || frame.reference_only) {
-      logger.add("WARNING", `${framePreviewTitle(frame)} 是系统/参考图，不能作为仓库主平面；请使用绿色主图或拖拽框选现方案主平面。`);
+      logger.add("WARNING", `${framePreviewTitle(frame)} 是系统/参考图，不能作为仓库主平面；请使用绿色主图或拖拽框选主平面。`);
       return;
     }
     if (frame?.bounds) {
@@ -1938,7 +2252,7 @@ function framePreviewLabel(frame) {
 
 function framePreviewTitle(frame) {
   if (!frame) return "图框";
-  if (frame.kind === "main_plan") return frame.title || "现方案主平面";
+  if (frame.kind === "main_plan") return frame.title || MAIN_PLAN_LABEL;
   if (frame.reference_only || frame.kind === "reference_plan") return frame.title || "参考图";
   return frame.title || framePreviewSystemLabel(frame);
 }
@@ -2098,6 +2412,20 @@ function renderInspector(entity, kind) {
   dom.inspector.innerHTML = rows
     .map(([label, value]) => `<div class="inspector-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(value)}</span></div>`)
     .join("");
+  if (attrs.placement && entity.id) {
+    const height = Number(attrs.install_height_m || elevation || 0);
+    const editor = document.createElement("div");
+    editor.className = "inspector-row";
+    editor.innerHTML = `<span>手调高度 m</span><input id="placementHeightInput" type="number" min="0.2" max="16" step="0.1" value="${height}" />`;
+    dom.inspector.appendChild(editor);
+    const tip = document.createElement("div");
+    tip.className = "inspector-row";
+    tip.innerHTML = "<span>位置</span><span>在物体上按住拖动</span>";
+    dom.inspector.appendChild(tip);
+    editor.querySelector("input")?.addEventListener("change", (event) => {
+      placement.updateSelectedHeight(entity.id, event.target.value);
+    });
+  }
 }
 
 function firstValue(...values) {

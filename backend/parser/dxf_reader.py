@@ -1,3 +1,15 @@
+"""DXF 读取：把模型空间实体规范化为「毫米坐标 + 可追溯几何」。
+
+关键约定：
+- 内部坐标统一为 **毫米**。单位来自 `$INSUNITS`；无单位(0)/未知码会被标记为
+  `unit_unspecified=True`，不会被静默当成毫米，调用方可以提示用户显式选择。
+- 支持显式单位覆盖：`read(path, unit="ft")` 或 `read(path, unit_scale_to_mm=304.8)`。
+- LWPOLYLINE / POLYLINE 保留 bulge（凸度）与圆弧段信息：长度包含真实弧长与闭合边，
+  预览可用 `geometry["segments"]` 画弧而不是画弦。
+- ARC 弧长按 DXF 语义（逆时针 start→end，(end-start) mod 360）计算。
+- 每个实体都带 `source_entity_id`（DXF handle），预览坐标可回溯原始实体。
+"""
+
 from __future__ import annotations
 
 import contextlib
@@ -8,8 +20,18 @@ from pathlib import Path
 from typing import Any
 
 import ezdxf
+from ezdxf.math import OCS
 
-UNIT_SCALE = {0: 1.0, 1: 25.4, 4: 1.0, 5: 10.0, 6: 1000.0}
+from parser.dxf_geometry import (
+    arc_length,
+    polyline_bounds,
+    polyline_curve_points,
+    polyline_length,
+    polyline_segments,
+)
+from parser.dxf_units import DEFAULT_SCALE_TO_MM, available_units, resolve_unit
+
+ZERO_TOLERANCE = 1e-9
 
 
 @dataclass
@@ -25,9 +47,13 @@ class Bounds:
         self.max_x = x if self.max_x is None else max(self.max_x, x)
         self.max_y = y if self.max_y is None else max(self.max_y, y)
 
+    def add_box(self, min_x: float, min_y: float, max_x: float, max_y: float) -> None:
+        self.add(min_x, min_y)
+        self.add(max_x, max_y)
+
     def as_dict(self) -> dict[str, dict[str, float]]:
         if self.min_x is None:
-            return {"min": {"x": 0.0, "y": 0.0}, "max": {"x": 10000.0, "y": 10000.0}}
+            return {"min": {"x": 0.0, "y": 0.0}, "max": {"x": 0.0, "y": 0.0}}
         return {
             "min": {"x": self.min_x or 0.0, "y": self.min_y or 0.0},
             "max": {"x": self.max_x or 0.0, "y": self.max_y or 0.0},
@@ -38,47 +64,112 @@ class DxfReader:
     supported_types = {"INSERT", "LINE", "LWPOLYLINE", "POLYLINE", "TEXT", "MTEXT", "DIMENSION", "CIRCLE", "ARC", "ELLIPSE"}
 
     @staticmethod
-    def read(path: Path) -> dict[str, Any]:
+    def read(
+        path: Path,
+        *,
+        unit: str | None = None,
+        unit_scale_to_mm: float | None = None,
+    ) -> dict[str, Any]:
         if not path.exists():
             raise FileNotFoundError(f"DXF 文件不存在: {path}")
         doc = ezdxf.readfile(path, errors="replace")
-        units = int(doc.header.get("$INSUNITS", 4) or 4)
-        scale = UNIT_SCALE.get(units, 1.0)
+        raw_units = doc.header.get("$INSUNITS", 0)
+        resolution = resolve_unit(raw_units, unit=unit, unit_scale_to_mm=unit_scale_to_mm)
+        scale = float(resolution["unit_scale_to_mm"])
         modelspace = doc.modelspace()
         layer_colors = {str(layer.dxf.name): int(layer.dxf.color or 256) for layer in doc.layers}
         layer_linetypes = {str(layer.dxf.name): str(layer.dxf.linetype or "") for layer in doc.layers}
         bounds = Bounds()
         entities: list[dict[str, Any]] = []
         total = 0
+        skipped_unsupported = 0
 
         for entity in modelspace:
             total += 1
             if entity.dxftype() not in DxfReader.supported_types:
+                skipped_unsupported += 1
                 continue
             normalized = DxfReader._normalize_entity(entity, scale, bounds, layer_colors, layer_linetypes)
             if normalized:
                 entities.append(normalized)
 
-        header_bounds = DxfReader._header_bounds(doc, scale)
         extents = bounds.as_dict()
-        if extents["min"]["x"] == 0.0 and extents["max"]["x"] == 10000.0 and header_bounds:
-            extents = header_bounds
+        if bounds.min_x is None:
+            header_bounds = DxfReader._header_bounds(doc, scale)
+            if header_bounds:
+                extents = header_bounds
 
-        return {
+        result: dict[str, Any] = {
             "path": str(path),
             "dxf_version": doc.dxfversion,
-            "unit_code": units,
+            "unit_code": resolution["unit_code"],
+            "unit_name": resolution["unit_name"],
             "unit_scale_to_mm": scale,
+            "unit_source": resolution["unit_source"],
+            "unit_unspecified": bool(resolution["unit_unspecified"]),
+            "unit_known": bool(resolution["unit_known"]),
+            "unit_explicit": bool(resolution["explicit_unit"]),
+            "header_unit_code": resolution["header_unit_code"],
+            "header_unit_name": resolution["header_unit_name"],
+            "available_units": available_units(),
             "layer_count": len(doc.layers),
             "layer_names": [layer.dxf.name for layer in doc.layers],
             "total_entities": total,
+            "skipped_unsupported_entities": skipped_unsupported,
             "entities": entities,
             "extents": extents,
         }
+        if resolution["unit_unspecified"]:
+            header_code = resolution["header_unit_code"]
+            if header_code in (0, None):
+                reason = "图纸未声明单位（$INSUNITS=0），已按毫米 1:1 处理，请在解析时确认单位"
+            else:
+                reason = f"图纸单位码 {header_code} 无法识别，已按毫米 1:1 处理，请显式选择单位"
+            result["unit_warning"] = reason
+            result["unit_resolution"] = resolution
+        return result
+
+    # ------------------------------------------------------------ 基础工具
 
     @staticmethod
     def _pt(point: Any, scale: float) -> dict[str, float]:
+        """把点坐标换到毫米。
+
+        注意：实体若带非默认 OCS/Z 轴倾斜，其平面内长度仍需按 1:1 处理；
+        这里只把 OCS 坐标映射到 WCS 平面（xy），用于位置展示与平面几何。
+        """
         return {"x": float(point[0]) * scale, "y": float(point[1]) * scale}
+
+    @staticmethod
+    def _entity_ocs(entity: Any) -> tuple[OCS, float]:
+        """返回实体的 OCS 与平面内长度补偿因子。
+
+        - **翻转的 extrusion（z 分量为负）** 是镜像块展开的正常结果，必须真的按该 OCS
+          做 OCS->WCS 变换，否则会丢掉插入点平移并把坐标整体取反。所以这里不丢弃它。
+        - **倾斜的 extrusion（|z| < 1）** 会让 OCS 平面内的距离短于真实距离，
+          用 1/|z| 补偿；z 分量接近 0（平面垂直于 XY）时无法表达平面几何，退化为恒等。
+        """
+        extrusion = (0.0, 0.0, 1.0)
+        try:
+            if entity.dxf.hasattr("extrusion"):
+                raw = entity.dxf.get("extrusion")
+                extrusion = (float(raw[0]), float(raw[1]), float(raw[2]))
+        except Exception:
+            extrusion = (0.0, 0.0, 1.0)
+        z = extrusion[2]
+        if abs(z) <= ZERO_TOLERANCE:
+            return OCS(), 1.0
+        try:
+            ocs = OCS(extrusion)
+        except Exception:
+            return OCS(), 1.0
+        return ocs, (abs(z) if abs(z) < 1.0 else 1.0)
+
+    @staticmethod
+    def _ocs_point(entity: Any, point: Any, scale: float) -> dict[str, float]:
+        ocs, factor = DxfReader._entity_ocs(entity)
+        wcs = ocs.to_wcs((float(point[0]), float(point[1]), 0.0))
+        return {"x": (float(wcs.x) * scale) / factor, "y": (float(wcs.y) * scale) / factor}
 
     @staticmethod
     def _add_point(bounds: Bounds, point: dict[str, float]) -> None:
@@ -133,19 +224,63 @@ class DxfReader:
             data["true_color"] = true_color
         return data
 
+    # ------------------------------------------------------------ 多段线
+
     @staticmethod
-    def _linear_length(points: list[dict[str, float]]) -> float:
-        total = 0.0
-        for start, end in zip(points, points[1:]):
-            total += ((end["x"] - start["x"]) ** 2 + (end["y"] - start["y"]) ** 2) ** 0.5
-        return total
+    def _polyline_vertices(entity: Any, scale: float, *, ocs: bool) -> tuple[list[dict[str, float]], list[float]]:
+        """提取顶点与凸度；`ocs=True` 时按实体 OCS 变换到平面坐标。"""
+        points: list[dict[str, float]] = []
+        bulges: list[float] = []
+        raw = list(entity.get_points("xyb"))
+        for item in raw:
+            x, y = float(item[0]), float(item[1])
+            bulge = float(item[2]) if len(item) > 2 and item[2] is not None else 0.0
+            if ocs:
+                point = DxfReader._ocs_point(entity, (x, y), scale)
+            else:
+                point = {"x": x * scale, "y": y * scale}
+            points.append(point)
+            bulges.append(bulge)
+        return points, bulges
+
+    @staticmethod
+    def _apply_polyline_geometry(
+        data: dict[str, Any],
+        points: list[dict[str, float]],
+        bulges: list[float],
+        closed: bool,
+        bounds: Bounds,
+    ) -> dict[str, Any]:
+        segments = polyline_segments(points, bulges, closed)
+        box = polyline_bounds(points, bulges, closed)
+        if box:
+            bounds.add_box(*box)
+        geometry: dict[str, Any] = {
+            "type": "Polygon" if closed else "LineString",
+            "points": points,
+            "closed": closed,
+            "bulges": bulges,
+            "segments": segments,
+        }
+        if any(bulges):
+            geometry["curve_points"] = polyline_curve_points(points, bulges, closed)
+        data["geometry"] = geometry
+        data["cad_native_linear"] = True
+        data["node_count"] = len(points)
+        data["native_length_mm"] = polyline_length(points, bulges, closed)
+        data["curve_length_mm"] = data["native_length_mm"]
+        data["has_arc_segments"] = any(segment["kind"] == "arc" for segment in segments)
+        return data
 
     @staticmethod
     def _with_linear_metrics(data: dict[str, Any], points: list[dict[str, float]]) -> dict[str, Any]:
         data["cad_native_linear"] = True
         data["node_count"] = len(points)
-        data["native_length_mm"] = DxfReader._linear_length(points)
+        data["native_length_mm"] = polyline_length(points, [0.0] * len(points), False)
+        data["curve_length_mm"] = data["native_length_mm"]
         return data
+
+    # ------------------------------------------------------------ 实体规范化
 
     @staticmethod
     def _normalize_entity(
@@ -159,7 +294,7 @@ class DxfReader:
         dxftype = entity.dxftype()
 
         if dxftype == "INSERT":
-            position = DxfReader._pt(entity.dxf.insert, scale)
+            position = DxfReader._ocs_point(entity, entity.dxf.insert, scale)
             DxfReader._add_point(bounds, position)
             attributes = {}
             for attrib in entity.attribs:
@@ -181,8 +316,8 @@ class DxfReader:
             return data
 
         if dxftype == "LINE":
-            start = DxfReader._pt(entity.dxf.start, scale)
-            end = DxfReader._pt(entity.dxf.end, scale)
+            start = DxfReader._ocs_point(entity, entity.dxf.start, scale)
+            end = DxfReader._ocs_point(entity, entity.dxf.end, scale)
             DxfReader._add_point(bounds, start)
             DxfReader._add_point(bounds, end)
             points = [start, end]
@@ -190,35 +325,22 @@ class DxfReader:
             return DxfReader._with_linear_metrics(data, points)
 
         if dxftype == "LWPOLYLINE":
-            points = [{"x": float(x) * scale, "y": float(y) * scale} for x, y in entity.get_points("xy")]
+            points, bulges = DxfReader._polyline_vertices(entity, scale, ocs=True)
             if not points:
                 return None
-            for point in points:
-                DxfReader._add_point(bounds, point)
-            closed = bool(entity.closed)
-            data["geometry"] = {
-                "type": "Polygon" if closed else "LineString",
-                "points": points,
-                "closed": closed,
-            }
-            return DxfReader._with_linear_metrics(data, points)
+            return DxfReader._apply_polyline_geometry(data, points, bulges, bool(entity.closed), bounds)
 
         if dxftype == "POLYLINE":
-            points = [{"x": float(point.x) * scale, "y": float(point.y) * scale} for point in entity.points()]
+            try:
+                points, bulges = DxfReader._polyline_vertices(entity, scale, ocs=True)
+            except Exception:
+                return None
             if not points:
                 return None
-            for point in points:
-                DxfReader._add_point(bounds, point)
-            closed = bool(entity.is_closed)
-            data["geometry"] = {
-                "type": "Polygon" if closed else "LineString",
-                "points": points,
-                "closed": closed,
-            }
-            return DxfReader._with_linear_metrics(data, points)
+            return DxfReader._apply_polyline_geometry(data, points, bulges, bool(entity.is_closed), bounds)
 
         if dxftype in {"TEXT", "MTEXT"}:
-            insert = DxfReader._pt(entity.dxf.insert, scale)
+            insert = DxfReader._ocs_point(entity, entity.dxf.insert, scale)
             DxfReader._add_point(bounds, insert)
             if dxftype == "MTEXT":
                 text = entity.plain_text()
@@ -252,25 +374,36 @@ class DxfReader:
             return data
 
         if dxftype == "CIRCLE":
-            center = DxfReader._pt(entity.dxf.center, scale)
-            radius = float(entity.dxf.radius) * scale
-            DxfReader._add_point(bounds, {"x": center["x"] - radius, "y": center["y"] - radius})
-            DxfReader._add_point(bounds, {"x": center["x"] + radius, "y": center["y"] + radius})
-            data["geometry"] = {"type": "Circle", "center": center, "radius": radius}
-            return data
-
-        if dxftype == "ARC":
-            center = DxfReader._pt(entity.dxf.center, scale)
+            center = DxfReader._ocs_point(entity, entity.dxf.center, scale)
             radius = float(entity.dxf.radius) * scale
             DxfReader._add_point(bounds, {"x": center["x"] - radius, "y": center["y"] - radius})
             DxfReader._add_point(bounds, {"x": center["x"] + radius, "y": center["y"] + radius})
             data["geometry"] = {
+                "type": "Circle",
+                "center": center,
+                "radius": radius,
+                "circumference_mm": 2.0 * 3.141592653589793 * radius,
+            }
+            return data
+
+        if dxftype == "ARC":
+            center = DxfReader._ocs_point(entity, entity.dxf.center, scale)
+            radius = float(entity.dxf.radius) * scale
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
+            from parser.dxf_geometry import arc_bounds
+
+            DxfReader._add_box(bounds, arc_bounds(center, radius, start_angle, end_angle))
+            data["geometry"] = {
                 "type": "Arc",
                 "center": center,
                 "radius": radius,
-                "start_angle": float(entity.dxf.start_angle),
-                "end_angle": float(entity.dxf.end_angle),
+                "start_angle": start_angle,
+                "end_angle": end_angle,
+                "length_mm": arc_length(radius, start_angle, end_angle),
             }
+            data["native_length_mm"] = data["geometry"]["length_mm"]
+            data["curve_length_mm"] = data["native_length_mm"]
             return data
 
         if dxftype == "ELLIPSE":
@@ -285,6 +418,12 @@ class DxfReader:
             return data
 
         return None
+
+    @staticmethod
+    def _add_box(bounds: Bounds, box: tuple[float, float, float, float]) -> None:
+        bounds.add_box(*box)
+
+    # ------------------------------------------------------------ INSERT 虚拟几何
 
     @staticmethod
     def _virtual_cad_shapes(
@@ -305,6 +444,7 @@ class DxfReader:
         if not role:
             return []
         for virtual in virtual_entities:
+            # 虚拟实体已经过块变换（含旋转/镜像/非均匀缩放），因此按 WCS 处理，不再套 OCS。
             normalized = DxfReader._normalize_virtual_shape(virtual, scale, layer_colors, layer_linetypes, role)
             if normalized:
                 shapes.append(normalized)
@@ -322,7 +462,7 @@ class DxfReader:
         for virtual in virtual_entities:
             if virtual.dxftype() != "DIMENSION":
                 continue
-            geometry = DxfReader._dimension_geometry(virtual, scale)
+            geometry = DxfReader._dimension_geometry(virtual, scale, ocs=False)
             if not geometry:
                 continue
             dimensions.append(
@@ -371,19 +511,21 @@ class DxfReader:
             return None
 
     @staticmethod
-    def _dimension_geometry(entity: Any, scale: float) -> dict[str, Any] | None:
+    def _dimension_geometry(entity: Any, scale: float, *, ocs: bool = True) -> dict[str, Any] | None:
         points: list[dict[str, float]] = []
         for name in ("defpoint", "defpoint2", "defpoint3", "defpoint4", "defpoint5", "text_midpoint"):
             try:
                 if not entity.dxf.hasattr(name):
                     continue
-                point = DxfReader._pt(getattr(entity.dxf, name), scale)
+                raw = getattr(entity.dxf, name)
+                point = DxfReader._ocs_point(entity, raw, scale) if ocs else DxfReader._pt(raw, scale)
             except Exception:
                 continue
             points.append(point)
         if not points:
             try:
-                points.append(DxfReader._pt(entity.dxf.insert, scale))
+                raw = entity.dxf.insert
+                points.append(DxfReader._ocs_point(entity, raw, scale) if ocs else DxfReader._pt(raw, scale))
             except Exception:
                 return None
         anchor = points[-1] if len(points) > 1 else points[0]
@@ -421,7 +563,7 @@ class DxfReader:
                     points.append((float(entity.dxf.start.x), float(entity.dxf.start.y)))
                     points.append((float(entity.dxf.end.x), float(entity.dxf.end.y)))
                 elif dxftype == "LWPOLYLINE":
-                    points.extend((float(x), float(y)) for x, y in entity.get_points("xy"))
+                    points.extend((float(item[0]), float(item[1])) for item in entity.get_points("xyb"))
                 elif dxftype == "POLYLINE":
                     points.extend((float(point.x), float(point.y)) for point in entity.points())
                 elif dxftype == "CIRCLE":
@@ -460,32 +602,59 @@ class DxfReader:
         data["cad_role"] = role
 
         if dxftype == "LINE":
+            # LINE 的 start/end 按 DXF 规范属 WCS（镜像块展开后 ezdxf 已给出正确 WCS 值）
             points = [DxfReader._pt(entity.dxf.start, scale), DxfReader._pt(entity.dxf.end, scale)]
             data["geometry"] = {"type": "LineString", "points": points}
             return DxfReader._with_linear_metrics(data, points)
-        if dxftype == "LWPOLYLINE":
-            points = [{"x": float(x) * scale, "y": float(y) * scale} for x, y in entity.get_points("xy")]
+        if dxftype in {"LWPOLYLINE", "POLYLINE"}:
+            # 关键：虚拟实体可能带着翻转的 extrusion（镜像/负缩放块的展开结果），
+            # 此时 get_points("xyb") 给的是该实体 OCS 内的坐标，必须经 OCS->WCS 转换，
+            # 否则插入点平移会丢失、坐标整体取反。
+            points, bulges = DxfReader._polyline_vertices(entity, scale, ocs=True)
             if not points:
                 return None
-            data["geometry"] = {"type": "Polygon" if entity.closed else "LineString", "points": points, "closed": bool(entity.closed)}
-            return DxfReader._with_linear_metrics(data, points)
-        if dxftype == "POLYLINE":
-            points = [{"x": float(point.x) * scale, "y": float(point.y) * scale} for point in entity.points()]
-            if not points:
-                return None
-            data["geometry"] = {"type": "Polygon" if entity.is_closed else "LineString", "points": points, "closed": bool(entity.is_closed)}
-            return DxfReader._with_linear_metrics(data, points)
+            closed = bool(entity.closed) if dxftype == "LWPOLYLINE" else bool(entity.is_closed)
+            segments = polyline_segments(points, bulges, closed)
+            geometry: dict[str, Any] = {
+                "type": "Polygon" if closed else "LineString",
+                "points": points,
+                "closed": closed,
+                "bulges": bulges,
+                "segments": segments,
+            }
+            if any(bulges):
+                geometry["curve_points"] = polyline_curve_points(points, bulges, closed)
+            data["geometry"] = geometry
+            data["cad_native_linear"] = True
+            data["node_count"] = len(points)
+            data["native_length_mm"] = polyline_length(points, bulges, closed)
+            data["curve_length_mm"] = data["native_length_mm"]
+            return data
         if dxftype == "CIRCLE":
-            data["geometry"] = {"type": "Circle", "center": DxfReader._pt(entity.dxf.center, scale), "radius": float(entity.dxf.radius) * scale}
+            radius = float(entity.dxf.radius) * scale
+            data["geometry"] = {
+                "type": "Circle",
+                # CIRCLE 的 center 属 OCS，镜像块展开后必须走 OCS->WCS
+                "center": DxfReader._ocs_point(entity, entity.dxf.center, scale),
+                "radius": radius,
+                "circumference_mm": 2.0 * 3.141592653589793 * radius,
+            }
             return data
         if dxftype == "ARC":
+            center = DxfReader._ocs_point(entity, entity.dxf.center, scale)
+            radius = float(entity.dxf.radius) * scale
+            start_angle = float(entity.dxf.start_angle)
+            end_angle = float(entity.dxf.end_angle)
             data["geometry"] = {
                 "type": "Arc",
-                "center": DxfReader._pt(entity.dxf.center, scale),
-                "radius": float(entity.dxf.radius) * scale,
-                "start_angle": float(entity.dxf.start_angle),
-                "end_angle": float(entity.dxf.end_angle),
+                "center": center,
+                "radius": radius,
+                "start_angle": start_angle,
+                "end_angle": end_angle,
+                "length_mm": arc_length(radius, start_angle, end_angle),
             }
+            data["native_length_mm"] = data["geometry"]["length_mm"]
+            data["curve_length_mm"] = data["native_length_mm"]
             return data
         if dxftype == "ELLIPSE":
             geometry = DxfReader._ellipse_geometry(entity, scale)
@@ -498,7 +667,7 @@ class DxfReader:
     @staticmethod
     def _ellipse_geometry(entity: Any, scale: float) -> dict[str, Any] | None:
         try:
-            center = DxfReader._pt(entity.dxf.center, scale)
+            center = DxfReader._ocs_point(entity, entity.dxf.center, scale)
             major_axis = entity.dxf.major_axis
             major = (float(major_axis[0]) ** 2 + float(major_axis[1]) ** 2) ** 0.5 * scale
             ratio = abs(float(entity.dxf.ratio or 1.0))
@@ -528,3 +697,6 @@ class DxfReader:
             }
         except Exception:
             return None
+
+
+__all__ = ["Bounds", "DEFAULT_SCALE_TO_MM", "DxfReader"]

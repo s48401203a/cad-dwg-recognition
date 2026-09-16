@@ -2,11 +2,12 @@ id: "express"
 display_name: "快运场地"
 site_type: "express"
 description: "月台、车尾摄像头、射灯、AP、鱼眼、半球和机柜的通用解析规则集合。"
+# 说明：月台/车尾相关距离属"可能针对特定场地"的数值，已移出公开配置，
+# 改由本机私有配置提供（site-adaptations.yaml 的 site_values.dock_camera_to_vehicle_tail_gap_m）。
 standards_overrides:
   site:
     site_type: "express"
-  dock:
-    camera_to_vehicle_tail_gap_m: 5.0
+  dock: {}
 rule_overrides: {}
 active_modules:
   - "warehouse.shell"

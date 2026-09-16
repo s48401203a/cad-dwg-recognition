@@ -11,6 +11,11 @@ from typing import Any
 import yaml
 
 from semantic.geometry_utils import line_length
+from semantic.site_adaptations import (
+    SiteAdaptations,
+    load_site_adaptations,
+    merge_rule_keywords,
+)
 
 DEFAULT_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 PROJECT_RULES_DIR = Path(os.environ["CAD_PROJECT_RULES_DIR"]).expanduser() if os.environ.get("CAD_PROJECT_RULES_DIR") else None
@@ -49,15 +54,10 @@ PLAN_COPY_OFFSET_X_MM = 178_200.0
 PLAN_COPY_COUNT = 4
 PLAN_MIN_Y_MM = -1_055_000.0
 PLAN_MAX_Y_MM = -760_000.0
-TRAY_LABEL_TOLERANCE_MM = 2_000.0
-TRAY_MIN_SEGMENT_MM = 5_000.0
-DOCK_HEIGHT_M = 1.2
-WAREHOUSE_WALL_HEIGHT_M = 10.5
-WAREHOUSE_ROOF_PEAK_HEIGHT_M = 12.6
-POWER_EQUIPMENT_SERVICE_CLEARANCE_M = 0.15
-POWER_EQUIPMENT_SERVICE_CHANNEL_M = 0.30
-POWER_EQUIPMENT_MIN_CENTER_SPACING_MM = 1_500.0
-POWER_EQUIPMENT_WALL_CLEARANCE_M = 0.15
+# 说明：月台高度、库墙高、设备间距、托盘判定阈值等**可能针对特定场地**的数值，
+# 来源与公开授权无法从仓库证据确认，已移出公共代码（见 semantic/site_adaptations.py）。
+# 未配置时对应推断**不套用**，不会回落到任何内置默认值。
+# 保留在此的只有单位换算等与场地无关的基础常量。
 OFFICE_SECOND_FLOOR_ELEVATION_M = 5.5
 OFFICE_ROOM_HEIGHT_M = 4.8
 OFFICE_CONTAINER_ROOM_HEIGHT_M = 3.0
@@ -261,9 +261,10 @@ SYSTEM_VIEW_REL_BOUNDS_BY_KIND_MM = {
         "max_y": -5_000.0,
     },
 }
-AP_LABEL_PREFIX_PATTERN = r"(?:BFR|BGL)(?:-[A-Z0-9]+){1,2}-(?:BG|CD)-AP-"
-AP_LABEL_PATTERN = re.compile(rf"{AP_LABEL_PREFIX_PATTERN}\d{{1,3}}", re.IGNORECASE)
-AP_LABEL_RANGE_PATTERN = re.compile(rf"({AP_LABEL_PREFIX_PATTERN})(\d{{1,3}})(?:[~～](\d{{1,3}}))?(?=$|[^A-Z0-9~～])", re.IGNORECASE)
+# 说明：设备编号的**具体前缀**与**范围写法**曾是硬编码字面量，来源与公开授权
+# 无法从仓库证据确认，已移到本机私有配置（见 semantic/site_adaptations.py 与
+# `CAD_PROJECT_RULES_DIR/site-adaptations.yaml`）。公共代码只保留通用解析逻辑：
+# 读取配置里的编号/范围模式，未配置时相关分支自然不命中。
 AP_LAYOUT_SPACING_FACTOR = 0.55
 DOME_COVERAGE_SECTOR_ANGLE_DEG = 90.0
 AP_LAYOUT_RADIUS_LIMITS_M = {
@@ -298,8 +299,8 @@ DEVICE_CABLE_CAD_ROLES = {
     "dome_coverage",
 }
 DEVICE_CABLE_LAYER_KEYWORDS = (
-    "IT弱电规划-摄像机",
-    "IT弱电规划-AP",
+    # 通用词。项目/客户专属的图层名样式由本机私有配置
+    # （site-adaptations.yaml 的 extra_layer_keywords）追加，不再写死在公共代码里。
     "摄像机",
     "摄像头",
     "鱼眼",
@@ -335,6 +336,10 @@ PROJECT_REAR_CAMERA_TAIL_GAP_RULES = (
 )
 
 
+#: 主平面图框的**中性**标题（不含任何项目/方案名称）
+MAIN_PLAN_TITLE = "主平面"
+
+
 class RuleEngine:
     def __init__(
         self,
@@ -351,6 +356,10 @@ class RuleEngine:
         self.manual_main_frame = manual_main_frame
         self.profile_configs = self._load_selected_profile_configs(self.site_profiles, profiles_dir)
         self.rules = self._merge_profile_rules(yaml.safe_load(mapping_path.read_text(encoding="utf-8")))
+        # 本机私有"场地适配"：设备编号模式与项目/方案名称关键词等，
+        # 未配置时为空（不内置任何供应商/客户前缀）。
+        self.adaptations: SiteAdaptations = load_site_adaptations()
+        merge_rule_keywords(self.rules, self.adaptations)
         base_standards = yaml.safe_load(standards_path.read_text(encoding="utf-8")) if standards_path.exists() else {}
         self.standards = self._merge_profile_standards(base_standards)
         self.layer_render_standards_path = layer_render_standards_path
@@ -371,6 +380,37 @@ class RuleEngine:
         self._modelspace_scale_infer_source = "dxf_unit_header"
         self.source_record: dict[str, Any] = {}
         self.suppressed_inferences: list[dict[str, Any]] = []
+
+    def _promote_native_cables(self, candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        promoted: list[dict[str, Any]] = []
+        for item in candidates:
+            cable_type = str(item.get("type") or "")
+            if not cable_type.startswith("cable."):
+                continue
+            if cable_type == "cable.unknown" and float(item.get("confidence") or 0) < 0.5:
+                continue
+            if not (item.get("geometry") or {}).get("points"):
+                continue
+            clone = deepcopy(item)
+            clone["route_source"] = "cad_polyline"
+            clone.pop("pending_promotion", None)
+            attrs = dict(clone.get("attributes") or {})
+            attrs["source_kind"] = attrs.get("source_kind") or "cad_native_line"
+            attrs["promoted"] = True
+            clone["attributes"] = attrs
+            if float(clone.get("confidence") or 0) >= 0.75 and cable_type != "cable.unknown":
+                clone["review_needed"] = False
+            promoted.append(clone)
+        return promoted
+
+    def _is_generic_mode(self) -> bool:
+        profiles = {str(item) for item in (self.site_profiles or [])}
+        if profiles & {"express", "supply_chain"}:
+            return False
+        return "generic" in profiles or not profiles
+
+    def _uses_site_layout_inferences(self) -> bool:
+        return bool({str(item) for item in (self.site_profiles or [])} & {"express", "supply_chain"})
 
     @classmethod
     def available_site_profiles(cls, profiles_dir: Path = DEFAULT_PROFILES_DIR) -> dict[str, Any]:
@@ -394,13 +434,11 @@ class RuleEngine:
         profiles_dir: Path = DEFAULT_PROFILES_DIR,
     ) -> list[str]:
         if not site_profiles:
-            if require_explicit:
-                raise ValueError("请选择至少一个场地类型 profile 后再解析")
-            site_profiles = ["express"]
+            site_profiles = ["generic"]
         registry = cls.available_site_profiles(profiles_dir)
         allowed = {str(item.get("id")) for item in registry.get("profiles", []) if item.get("id")}
         if not allowed:
-            allowed = {"express"}
+            allowed = {"generic", "express", "supply_chain"}
         normalized: list[str] = []
         for profile in site_profiles:
             profile_id = str(profile or "").strip()
@@ -412,7 +450,7 @@ class RuleEngine:
                 normalized.append(profile_id)
         if require_explicit and not normalized:
             raise ValueError("请选择至少一个场地类型 profile 后再解析")
-        return normalized or ["express"]
+        return normalized or ["generic"]
 
     def _normalize_modelspace_units(self, parsed: dict[str, Any]) -> dict[str, Any]:
         scale = self._infer_modelspace_scale_to_mm(parsed.get("entities", []))
@@ -835,7 +873,7 @@ class RuleEngine:
             semantic_type = classification["type"]
             confidence = float(classification["confidence"])
 
-            if self._is_device_type(semantic_type) and entity.get("geometry", {}).get("type") == "Point":
+            if self._is_device_type(semantic_type) and entity.get("geometry", {}).get("type") in {"Point", "Circle"}:
                 position = entity.get("geometry", {}).get("position")
                 if position and not self._is_model_device_point(position, entity, semantic_type):
                     continue
@@ -869,7 +907,10 @@ class RuleEngine:
                 expected["ap"] = fallback_ap_count
         expected_sources = self._expected_inventory_sources(model_entities, expected)
         office_model = self._infer_office_model(model_entities)
-        cables.extend(self._infer_tray_cables(model_entities))
+        if self._is_generic_mode():
+            cables.extend(self._promote_native_cables(cable_candidates))
+        else:
+            cables.extend(self._infer_tray_cables(model_entities))
         devices = [self._fold_item_geometry(device) for device in devices]
         devices = self._filter_project_device_exclusions(devices)
         cables = self._dedup_linear_items([self._fold_item_geometry(cable) for cable in cables])
@@ -881,17 +922,20 @@ class RuleEngine:
         devices = self._filter_no_main_plan_rear_symbol_copies(devices)
         devices = self._filter_parameter_camera_symbol_duplicates(devices)
         self._repair_duplicate_ap_labels(devices, parsed["entities"])
-        devices.extend(self._infer_missing_expected_ap_devices(devices, parsed["entities"], office_model))
+        if not self._is_generic_mode():
+            devices.extend(self._infer_missing_expected_ap_devices(devices, parsed["entities"], office_model))
         devices = [self._normalize_office_device(device, office_model) for device in devices]
         devices = self._dedup_cabinet_labels(devices)
         devices = self._filter_secondary_system_view_cabinets(devices)
-        devices = self._ensure_ups_battery_cabinet(devices)
+        if not self._is_generic_mode():
+            devices = self._ensure_ups_battery_cabinet(devices)
         self._apply_power_equipment_clearance(devices)
         self._apply_camera_parameter_notes(devices, parsed["entities"])
         self._annotate_cabinets(devices)
-        cables.extend(self._infer_cabinet_links(devices))
-        cables.extend(self._infer_office_device_links(devices))
-        cables.extend(self._infer_single_cabinet_device_links(devices))
+        if self._uses_site_layout_inferences():
+            cables.extend(self._infer_cabinet_links(devices))
+            cables.extend(self._infer_office_device_links(devices))
+            cables.extend(self._infer_single_cabinet_device_links(devices))
         cables = self._dedup_linear_items(cables)
         self._renumber_generated_labels(devices)
         self._apply_cad_coverage_overlays(devices, model_entities)
@@ -905,17 +949,24 @@ class RuleEngine:
         site = self._site_metadata(analysis_entities)
         areas = self._infer_areas(model_entities, office_model)
         shell_area = self._infer_warehouse_shell(structures, devices)
-        if not shell_area and not (self.base_view and self.base_view.get("no_main_plan_mode")):
+        if (
+            not shell_area
+            and not self._is_generic_mode()
+            and not (self.base_view and self.base_view.get("no_main_plan_mode"))
+        ):
             shell_area = self._infer_operational_shell(devices)
         if shell_area:
             areas.insert(0, shell_area)
         self._orient_site_bullet_cameras(devices, shell_area, model_entities)
-        parking_spaces, fixtures = self._infer_tail_dock_objects(devices, structures, office_model, shell_area, model_entities)
-        parking_spaces, fixtures = self._suppress_unanchored_tail_dock_inferences(parking_spaces, fixtures)
-        parking_spaces = self._apply_project_rear_camera_tail_gap_to_parking_spaces(parking_spaces)
-        self._orient_bullet_cameras_by_cad_parking(devices, parking_spaces)
-        cables.extend(self._infer_cabinet_power_cables(devices))
-        cables.extend(self._infer_spotlight_cables(fixtures, devices))
+        if self._uses_site_layout_inferences():
+            parking_spaces, fixtures = self._infer_tail_dock_objects(devices, structures, office_model, shell_area, model_entities)
+            parking_spaces, fixtures = self._suppress_unanchored_tail_dock_inferences(parking_spaces, fixtures)
+            parking_spaces = self._apply_project_rear_camera_tail_gap_to_parking_spaces(parking_spaces)
+            self._orient_bullet_cameras_by_cad_parking(devices, parking_spaces)
+            cables.extend(self._infer_cabinet_power_cables(devices))
+            cables.extend(self._infer_spotlight_cables(fixtures, devices))
+        else:
+            parking_spaces, fixtures = [], []
         cables = self._dedup_linear_items(cables)
         cables = self._filter_project_cable_exclusions(cables)
         cable_candidates = self._dedup_linear_items(
@@ -1002,6 +1053,12 @@ class RuleEngine:
                 "extents_source": "semantic_model_bounds_outlier_filtered" if model_extents else "dxf_raw_bounds",
                 "unit": "mm",
                 "unit_scale_to_mm": parsed.get("unit_scale_to_mm"),
+                "unit_name": parsed.get("unit_name"),
+                "unit_code": parsed.get("unit_code"),
+                "unit_source": parsed.get("unit_source"),
+                "unit_unspecified": bool(parsed.get("unit_unspecified")),
+                "unit_warning": parsed.get("unit_warning"),
+                "header_unit_code": parsed.get("header_unit_code"),
                 "modelspace_scale_to_mm": self.modelspace_scale_to_mm,
                 "modelspace_scale_source": self.modelspace_scale_source,
                 "layers": parsed.get("layer_count", 0),
@@ -1050,7 +1107,9 @@ class RuleEngine:
                 continue
             geometry = entity.get("geometry")
             anchor = self._geometry_anchor(geometry or {})
-            if not anchor or self._plan_copy_index(anchor) is None:
+            if not anchor:
+                continue
+            if not self._is_generic_mode() and self._plan_copy_index(anchor) is None:
                 continue
             layer = str(entity.get("layer", ""))
             main_outline = self._main_plan_outline_structure(entity, layer, entity_type, geometry or {})
@@ -1560,8 +1619,159 @@ class RuleEngine:
                     device.setdefault("attributes", {})["deduped_symbol_fisheye_count"] = symbol_dropped
         return kept
 
-    @staticmethod
-    def _dedup_ap_label_symbol_devices(devices: list[dict[str, Any]], expected: dict[str, int]) -> list[dict[str, Any]]:
+    # ------------------------------------------------------------ 场地适配（本机私有配置）
+    # 说明：下面这些辅助方法只做"读配置 + 通用匹配"，不内置任何供应商/客户字面量。
+    # 未配置 `site-adaptations.yaml` 时全部返回"不匹配"，行为等价于该适配不存在。
+
+    def _matches_adaptation_label(self, model: str, text: str) -> bool:
+        """整串匹配某个模型的编号模式（来自私有配置）。"""
+        candidate = str(text or "").strip()
+        if not candidate:
+            return False
+        return any(pattern.fullmatch(candidate) for pattern in self.adaptations.patterns_for(model))
+
+    def _search_adaptation_label(self, model: str, text: str) -> bool:
+        """在文本中搜索某个模型的编号模式（来自私有配置）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(pattern.search(candidate) for pattern in self.adaptations.patterns_for(model))
+
+    def _search_adaptation_range_any(self, text: str) -> bool:
+        """在文本中搜索任意模型的编号范围模式（来自私有配置）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(pattern.search(candidate) for pattern in self.adaptations.all_range_patterns())
+
+    def _adaptation_range_matches(self, model: str, text: str) -> list[re.Match[str]]:
+        matches: list[re.Match[str]] = []
+        candidate = str(text or "")
+        if not candidate:
+            return matches
+        for pattern in self.adaptations.range_patterns_for(model):
+            matches.extend(pattern.finditer(candidate))
+        return matches
+
+    def _adaptation_range_fullmatch(self, model: str, text: str) -> re.Match[str] | None:
+        candidate = str(text or "")
+        if not candidate:
+            return None
+        for pattern in self.adaptations.range_patterns_for(model):
+            match = pattern.fullmatch(candidate)
+            if match:
+                return match
+        return None
+
+    def _adaptation_fullmatch_any(self, model: str, text: str) -> re.Match[str] | None:
+        """按某个模型整串匹配（模式来自私有配置；未配置返回 None）。"""
+        candidate = str(text or "")
+        if not candidate:
+            return None
+        for pattern in self.adaptations.patterns_for(model):
+            match = pattern.fullmatch(candidate)
+            if match:
+                return match
+        return None
+
+    def _warehouse_shell_attrs(self) -> dict[str, Any]:
+        """仓库外壳高度：只写入已配置的项（公开 standards 或本机私有配置）。"""
+        site = self.standards.get("site") or {}
+        attrs: dict[str, Any] = {}
+        for attr_name, config_key in (
+            ("height_m", "warehouse_wall_height_m"),
+            ("roof_peak_height_m", "warehouse_roof_peak_height_m"),
+        ):
+            raw = site.get(config_key)
+            value = float(raw) if raw is not None else self._site_value(config_key)
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _dock_value_attrs(self) -> dict[str, Any]:
+        """月台相关数值：只写入已配置的项（来自公开 standards 或本机私有配置）。"""
+        dock = self.standards.get("dock") or {}
+        attrs: dict[str, Any] = {}
+        for attr_name, config_key in (
+            ("tail_camera_to_vehicle_gap_m", "camera_to_vehicle_tail_gap_m"),
+            ("vehicle_wall_clearance_m", "vehicle_wall_clearance_m"),
+        ):
+            raw = dock.get(config_key)
+            value = float(raw) if raw is not None else self._site_value(f"dock_{config_key}")
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _power_clearance_attrs(self, channel_key: str) -> dict[str, Any]:
+        """电力设备净空属性：只写入已配置的项（未配置则完全不写，不回落默认值）。"""
+        attrs: dict[str, Any] = {}
+        mapping = (
+            ("maintenance_clearance_m", "power_equipment_service_clearance_m"),
+            ("wall_clearance_m", "power_equipment_wall_clearance_m"),
+            (channel_key, "power_equipment_service_channel_m"),
+        )
+        for attr_name, config_key in mapping:
+            value = self._site_value(config_key)
+            if value is not None:
+                attrs[attr_name] = value
+        return attrs
+
+    def _site_value(self, key: str) -> float | None:
+        """读取私有配置中的场地数值；未配置时返回 None（调用方须跳过）。"""
+        return self.adaptations.value(key)
+
+    def _site_value_mm(self, key: str) -> float | None:
+        value = self._site_value(key)
+        return None if value is None else float(value)
+
+    def _vehicle_legend_weight(self, vehicle_id: str) -> float:
+        """车辆图例计数权重；未配置时返回 1.0（等权，而不是某个场地的计数）。"""
+        value = self.adaptations.legend_count(vehicle_id)
+        return float(value) if value else 1.0
+
+    def _extra_quantity_patterns(self, key: str) -> list[str]:
+        """本机私有配置追加的"数量注释"正则（未配置时为空）。"""
+        return list(self.adaptations.extra_quantity_patterns.get(key, []))
+
+    def _extra_layer_keywords(self) -> list[str]:
+        """本机私有配置追加的图层名关键词（未配置时为空）。"""
+        return list(self.adaptations.extra_layer_keywords)
+
+    def _adaptation_prefixes(self, model: str) -> list[str]:
+        """从私有配置的编号模式里提取可用于"前缀枚举"的字面前缀。
+
+        只提取模式中不含占位符的固定前缀部分；未配置时返回空列表。
+        """
+        prefixes: list[str] = []
+        for raw in self.adaptations.label_range_patterns.get(model, []) + self.adaptations.label_patterns.get(model, []):
+            head = re.split(r"[\{\(\[]", str(raw), maxsplit=1)[0].strip()
+            head = head.rstrip("-_. ")
+            if head and head not in prefixes:
+                prefixes.append(head)
+        return prefixes
+
+    def _label_has_adaptation_token(self, text: str) -> bool:
+        """文本是否含任一私有配置前缀（用于区分"符号"与"文本编号"两类记录）。"""
+        candidate = str(text or "").upper()
+        if not candidate:
+            return False
+        for model in self.adaptations.label_patterns:
+            for prefix in self._adaptation_prefixes(model):
+                if prefix.upper() and prefix.upper() in candidate:
+                    return True
+        return False
+
+    def _matches_project_name_keyword(self, text: str) -> bool:
+        """文本是否含**本机私有配置**给出的项目/方案名称关键词。
+
+        未配置时返回 False（即不把任何字样当作项目名）。
+        """
+        candidate = str(text or "")
+        if not candidate:
+            return False
+        return any(keyword and keyword in candidate for keyword in self.adaptations.project_name_keywords)
+
+    def _dedup_ap_label_symbol_devices(self, devices: list[dict[str, Any]], expected: dict[str, int]) -> list[dict[str, Any]]:
         expected_ap = int(expected.get("ap", 0) or 0)
         if expected_ap <= 0:
             return devices
@@ -1574,7 +1784,7 @@ class RuleEngine:
             device
             for device in ap_devices
             if (device.get("attributes") or {}).get("source_kind") in {"text_label", "text_label_range"}
-            and AP_LABEL_PATTERN.fullmatch(re.sub(r"\s+", "", str(device.get("label", "")).upper()))
+            and self._matches_adaptation_label("ap", re.sub(r"\s+", "", str(device.get("label", "")).upper()))
         ]
         symbol_devices = [
             device
@@ -1782,11 +1992,15 @@ class RuleEngine:
         if not ups or not ups.get("geometry", {}).get("position"):
             return devices
         ups_pos = ups["geometry"]["position"]
+        # 设备中心间距属场地数值：未配置则不推断 UPS 电池柜位置
+        spacing_mm = self._site_value("power_equipment_min_center_spacing_mm")
+        if spacing_mm is None:
+            return devices
         core = self._primary_power_room_core_cabinet(devices, ups)
         direction = self._power_equipment_layout_direction(core, ups)
         battery_pos = {
-            "x": float(ups_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-            "y": float(ups_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+            "x": float(ups_pos["x"]) + direction["x"] * spacing_mm,
+            "y": float(ups_pos["y"]) + direction["y"] * spacing_mm,
         }
         ups_attrs = ups.get("attributes") or {}
         battery_attrs = {
@@ -1795,9 +2009,7 @@ class RuleEngine:
             "source_kind": "ups_battery_cabinet_inferred",
             "source_device_id": ups.get("id"),
             "source_label": ups.get("label"),
-            "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-            "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-            "service_channel_to_ups_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+            **self._power_clearance_attrs("service_channel_to_ups_m"),
             "position_source": "weak_current_power_room_service_clearance_rule",
             "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
         }
@@ -1832,8 +2044,9 @@ class RuleEngine:
             return None
         return min(candidates, key=lambda item: RuleEngine._distance(ups_pos, item["geometry"]["position"]))
 
-    @staticmethod
-    def _power_equipment_layout_direction(core: dict[str, Any] | None, ups: dict[str, Any]) -> dict[str, float]:
+    def _power_equipment_layout_direction(
+        self, core: dict[str, Any] | None, ups: dict[str, Any], spacing_mm: float | None = None
+    ) -> dict[str, float]:
         ups_pos = ups.get("geometry", {}).get("position") or {}
         core_pos = core.get("geometry", {}).get("position") if core else None
         if core_pos:
@@ -1844,7 +2057,7 @@ class RuleEngine:
                 if bbox:
                     left_clearance = float(core_pos.get("x", 0.0)) - float(bbox.get("min_x", core_pos.get("x", 0.0)))
                     right_clearance = float(bbox.get("max_x", core_pos.get("x", 0.0))) - float(core_pos.get("x", 0.0))
-                    if max(left_clearance, right_clearance) >= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM * 2:
+                    if spacing_mm and max(left_clearance, right_clearance) >= spacing_mm * 2:
                         return {"x": -1.0 if left_clearance >= right_clearance else 1.0, "y": 0.0}
             length = hypot(dx, dy)
             if length >= 1.0:
@@ -1865,34 +2078,33 @@ class RuleEngine:
         ups = self._primary_ups_device(devices)
         if not ups or not ups.get("geometry", {}).get("position"):
             return
+        spacing_mm = self._site_value("power_equipment_min_center_spacing_mm")
         core = self._primary_power_room_core_cabinet(devices, ups)
-        direction = self._power_equipment_layout_direction(core, ups)
+        direction = self._power_equipment_layout_direction(core, ups, spacing_mm)
         ups_reseated = False
         ups_attrs = ups.setdefault("attributes", {})
         ups_attrs.update(
             {
-                "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-                "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-                "service_channel_to_core_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+                **self._power_clearance_attrs("service_channel_to_core_m"),
                 "position_source": ups_attrs.get("position_source") or "cad_label_with_service_clearance_check",
                 "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
             }
         )
         if core and core.get("geometry", {}).get("position"):
             core_attrs = core.setdefault("attributes", {})
-            core_attrs.setdefault("maintenance_clearance_m", POWER_EQUIPMENT_SERVICE_CLEARANCE_M)
-            core_attrs.setdefault("wall_clearance_m", POWER_EQUIPMENT_WALL_CLEARANCE_M)
-            core_attrs.setdefault("service_channel_to_ups_m", POWER_EQUIPMENT_SERVICE_CHANNEL_M)
+            for key, value in self._power_clearance_attrs("service_channel_to_ups_m").items():
+                core_attrs.setdefault(key, value)
             core_attrs.setdefault("installation_constraint", "floor_cabinet_keep_service_clearance_and_no_wall_contact")
             core_pos = core["geometry"]["position"]
             ups_pos = ups["geometry"]["position"]
-            if (
-                self._distance(core_pos, ups_pos) <= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM
+            # 间距未配置时不做"重新排布"这类位置调整
+            if spacing_mm is not None and (
+                self._distance(core_pos, ups_pos) <= spacing_mm
                 or self._power_equipment_needs_lateral_reseat(core, ups, direction)
             ):
                 ups["geometry"]["position"] = {
-                    "x": float(core_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-                    "y": float(core_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+                    "x": float(core_pos["x"]) + direction["x"] * spacing_mm,
+                    "y": float(core_pos["y"]) + direction["y"] * spacing_mm,
                 }
                 ups_attrs["position_adjustment_source"] = "weak_current_power_room_same_room_lateral_service_channel"
                 ups_reseated = True
@@ -1901,18 +2113,21 @@ class RuleEngine:
             battery_attrs = battery.setdefault("attributes", {})
             battery_attrs.update(
                 {
-                    "maintenance_clearance_m": POWER_EQUIPMENT_SERVICE_CLEARANCE_M,
-                    "wall_clearance_m": POWER_EQUIPMENT_WALL_CLEARANCE_M,
-                    "service_channel_to_ups_m": POWER_EQUIPMENT_SERVICE_CHANNEL_M,
+                    **self._power_clearance_attrs("service_channel_to_ups_m"),
                     "installation_constraint": "floor_power_equipment_keep_service_clearance_and_no_wall_contact",
                 }
             )
             battery_pos = battery.get("geometry", {}).get("position")
             ups_pos = ups.get("geometry", {}).get("position")
-            if battery_pos and ups_pos and (ups_reseated or self._distance(battery_pos, ups_pos) <= POWER_EQUIPMENT_MIN_CENTER_SPACING_MM):
+            if (
+                spacing_mm is not None
+                and battery_pos
+                and ups_pos
+                and (ups_reseated or self._distance(battery_pos, ups_pos) <= spacing_mm)
+            ):
                 battery["geometry"]["position"] = {
-                    "x": float(ups_pos["x"]) + direction["x"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
-                    "y": float(ups_pos["y"]) + direction["y"] * POWER_EQUIPMENT_MIN_CENTER_SPACING_MM,
+                    "x": float(ups_pos["x"]) + direction["x"] * spacing_mm,
+                    "y": float(ups_pos["y"]) + direction["y"] * spacing_mm,
                 }
                 battery_attrs["position_adjustment_source"] = "weak_current_power_room_same_room_lateral_service_channel"
 
@@ -2105,14 +2320,15 @@ class RuleEngine:
         match = re.search(r"-AP-0*(\d{1,3})$", str(label or "").upper())
         return int(match.group(1)) if match else 0
 
-    @staticmethod
-    def _expected_site_ap_max_number(entities: list[dict[str, Any]]) -> int | None:
+    def _expected_site_ap_max_number(self, entities: list[dict[str, Any]]) -> int | None:
         text = "\n".join(str(entity.get("text") or "") for entity in entities if entity.get("entity_type") in {"TEXT", "MTEXT"})
         compact = re.sub(r"\s+", "", text.upper())
-        patterns = (
+        # 公开版本只保留通用写法；项目专属的编号注释写法由本机私有配置追加
+        # （site-adaptations.yaml 的 extra_quantity_patterns）。
+        patterns = [
             r"AP[：:]?\d{1,3}台[（(]场地(\d{1,3})台",
-            r"场地AP[（(]?编号[：:]?BFR-[A-Z0-9-]+-AP-0*1[~～]0*(\d{1,3})",
-        )
+            *self._extra_quantity_patterns("ap"),
+        ]
         values: list[int] = []
         for pattern in patterns:
             values.extend(int(match.group(1)) for match in re.finditer(pattern, compact))
@@ -2129,8 +2345,7 @@ class RuleEngine:
             ],
         )
 
-    @staticmethod
-    def _first_expected_ap_range_end(entities: list[dict[str, Any]], label: str) -> int | None:
+    def _first_expected_ap_range_end(self, entities: list[dict[str, Any]], label: str) -> int | None:
         label_text = str(label or "").upper()
         prefix_match = re.match(r"(.+-AP-)0*\d{1,3}$", label_text)
         if not prefix_match:
@@ -2140,7 +2355,7 @@ class RuleEngine:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             compact = re.sub(r"\s+", "", str(entity.get("text") or "").upper())
-            for match in AP_LABEL_RANGE_PATTERN.finditer(compact):
+            for match in self._adaptation_range_matches("ap", compact):
                 if match.group(1).upper() != prefix or not match.group(3):
                     continue
                 return int(match.group(3))
@@ -2275,15 +2490,14 @@ class RuleEngine:
             return f"{match.group(1)}-{int(match.group(2)):02d}"
         return compact
 
-    @staticmethod
-    def _expected_ap_labels(entities: list[dict[str, Any]]) -> list[str]:
+    def _expected_ap_labels(self, entities: list[dict[str, Any]]) -> list[str]:
         labels: list[str] = []
         seen: set[str] = set()
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             compact = re.sub(r"\s+", "", str(entity.get("text") or "").upper())
-            for match in AP_LABEL_RANGE_PATTERN.finditer(compact):
+            for match in self._adaptation_range_matches("ap", compact):
                 prefix = match.group(1)
                 start = int(match.group(2))
                 end = int(match.group(3) or match.group(2))
@@ -2304,7 +2518,7 @@ class RuleEngine:
         raw_text = str(entity.get("text", "")).strip()
         text = re.sub(r"\s+", "", raw_text.upper())
         position = entity.get("geometry", {}).get("position")
-        range_match = AP_LABEL_RANGE_PATTERN.fullmatch(text)
+        range_match = self._adaptation_range_fullmatch("ap", text)
         if range_match and range_match.group(3) and position and len(text) <= 42:
             prefix = range_match.group(1)
             start = int(range_match.group(2))
@@ -2368,7 +2582,7 @@ class RuleEngine:
 
     @staticmethod
     def _is_device_type(semantic_type: str) -> bool:
-        return semantic_type.startswith(("security.camera", "network."))
+        return semantic_type.startswith(("security.camera", "network.", "power.", "lighting."))
 
     @staticmethod
     def _camera_label_number(label: str, prefix: str) -> int | None:
@@ -2440,7 +2654,7 @@ class RuleEngine:
             semantic_type = "security.camera.dome"
             confidence = 0.95
 
-        elif AP_LABEL_PATTERN.fullmatch(text):
+        elif self._matches_adaptation_label("ap", text):
             semantic_type = "network.ap"
 
         elif re.fullmatch(r"(?:\d{1,2}KVA)?UPS(?:电源|控制主机|主机|电池|电池柜|电池组合主机)?|(?:UPS)?电池柜", text):
@@ -3047,22 +3261,48 @@ class RuleEngine:
         site_defaults = self.standards.get("site", {})
         heights = self._infer_warehouse_heights(entities)
         site_type = "mixed" if len(self.site_profiles) > 1 else self.site_profiles[0]
-        return {
+        if self._is_generic_mode():
+            return {
+                "site_type": site_defaults.get("site_type") or "generic",
+                "site_profiles": self.site_profiles,
+                "source": "generic_cad_layers",
+            }
+        # 场地尺寸（月台高度、库墙高、屋脊高等）属场地数值：只写已配置的项。
+        def _site_number(config_key: str, standards_key: str) -> float | None:
+            if site_defaults.get(standards_key) is not None:
+                return float(site_defaults[standards_key])
+            return self._site_value(config_key)
+
+        metadata = {
             "site_type": site_type if len(self.site_profiles) > 1 else site_defaults.get("site_type") or site_type,
             "site_profiles": self.site_profiles,
-            "dock_height_m": float(site_defaults.get("dock_height_m", DOCK_HEIGHT_M)),
-            "warehouse_floor_height_m": float(site_defaults.get("warehouse_floor_height_m", DOCK_HEIGHT_M)),
-            "yard_ground_elevation_m": float(site_defaults.get("yard_ground_elevation_m", 0.0)),
-            "warehouse_wall_height_m": heights.get("warehouse_wall_height_m", float(site_defaults.get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M))),
-            "warehouse_roof_peak_height_m": heights.get("warehouse_roof_peak_height_m", float(site_defaults.get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M))),
-            "tail_camera_to_vehicle_gap_m": float(self.standards.get("dock", {}).get("camera_to_vehicle_tail_gap_m", 5.0)),
-            "vehicle_wall_clearance_m": float(self.standards.get("dock", {}).get("vehicle_wall_clearance_m", 0.6)),
+        }
+        for attr_name, config_key, standards_key in (
+            ("dock_height_m", "dock_height_m", "dock_height_m"),
+            ("warehouse_floor_height_m", "warehouse_floor_height_m", "warehouse_floor_height_m"),
+            ("warehouse_wall_height_m", "warehouse_wall_height_m", "warehouse_wall_height_m"),
+            ("warehouse_roof_peak_height_m", "warehouse_roof_peak_height_m", "warehouse_roof_peak_height_m"),
+        ):
+            measured = heights.get(attr_name)
+            value = float(measured) if measured is not None else _site_number(config_key, standards_key)
+            if value is not None:
+                metadata[attr_name] = value
+        yard = site_defaults.get("yard_ground_elevation_m")
+        if yard is not None:
+            metadata["yard_ground_elevation_m"] = float(yard)
+        return {
+            **metadata,
+            **self._dock_value_attrs(),
             "source": "用户验收反馈 + 施工工艺图高度标注 + 公司标准图例",
             "vehicle_standard": "4.2M箱式货车 / 9.6M箱式货车 / 17.5M集卡挂车 / 61尺集卡",
         }
 
-    @staticmethod
-    def _infer_warehouse_heights(entities: list[dict[str, Any]]) -> dict[str, float]:
+    def _infer_warehouse_heights(self, entities: list[dict[str, Any]]) -> dict[str, float]:
+        """从图纸里的高度标注推断仓库尺寸。
+
+        期望的高度目标值（库墙高/屋脊高的参考点）属场地数值：未配置时**不做该推断**，
+        只保留"能在图上直接读出的候选值"这一中性事实，不挑选、不写入结果。
+        """
         values: set[float] = set()
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
@@ -3075,13 +3315,16 @@ class RuleEngine:
                     continue
                 if 8.0 <= value <= 14.0:
                     values.add(value)
+        wall_target = self._site_value("warehouse_wall_height_m")
+        peak_target = self._site_value("warehouse_roof_peak_height_m")
         heights: dict[str, float] = {}
-        if values:
-            lower = min(values, key=lambda item: abs(item - 10.5))
-            peak = min(values, key=lambda item: abs(item - 12.6))
-            if 9.0 <= lower <= 11.5:
+        if values and wall_target is not None and peak_target is not None:
+            lower = min(values, key=lambda item: abs(item - wall_target))
+            peak = min(values, key=lambda item: abs(item - peak_target))
+            # 容差取目标值的 ±15%，避免把明显无关的高度当成库墙高
+            if abs(lower - wall_target) <= max(0.5, wall_target * 0.15):
                 heights["warehouse_wall_height_m"] = lower
-            if peak >= lower:
+            if peak >= lower and abs(peak - peak_target) <= max(0.5, peak_target * 0.15):
                 heights["warehouse_roof_peak_height_m"] = peak
         return heights
 
@@ -3094,8 +3337,7 @@ class RuleEngine:
                 "仓库外墙",
                 outline["points"],
                 {
-                    "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                    "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                    **self._warehouse_shell_attrs(),
                     "source": "优先采用基准主平面的闭合建筑轮廓线；办公夹层、系统图框、标题框和非基准系统视图结构不参与仓库外墙",
                     "source_structure_id": outline.get("source_structure_id"),
                     "source_layer": outline.get("source_layer"),
@@ -3133,8 +3375,7 @@ class RuleEngine:
             max_x,
             max_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "基准主平面墙体/轮廓/月台图层外包络，停车位、办公夹层、系统图框和标题框不参与仓库外墙包络",
             },
         )
@@ -3300,8 +3541,7 @@ class RuleEngine:
             right_x,
             top_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "基于左右车尾摄像头队列和主体墙/区域/道口边界线推断仓库主体；道路红线、园区外圈、车位阵列外缘和第三方租赁区不参与外墙",
                 "inferred_from": "dock_layout_subject",
                 "left_camera_count": len(left_cluster["cluster"]),
@@ -3816,8 +4056,7 @@ class RuleEngine:
             max_x + pad_x,
             max_y + pad_y,
             {
-                "height_m": float(self.standards.get("site", {}).get("warehouse_wall_height_m", WAREHOUSE_WALL_HEIGHT_M)),
-                "roof_peak_height_m": float(self.standards.get("site", {}).get("warehouse_roof_peak_height_m", WAREHOUSE_ROOF_PEAK_HEIGHT_M)),
+                **self._warehouse_shell_attrs(),
                 "source": "有效平面设备/机柜分布包络推断；施工工艺和安装详图不参与仓库外墙包络",
                 "inferred_from": "operational_devices",
             },
@@ -4155,7 +4394,7 @@ class RuleEngine:
         tail_gap_mm = float(dock_standard.get("camera_to_vehicle_tail_gap_m", 5.0)) * 1000.0
         wall_clearance_mm = float(dock_standard.get("vehicle_wall_clearance_m", 0.6)) * 1000.0
         vehicle_ground_elevation_m = float(self.standards.get("site", {}).get("yard_ground_elevation_m", 0.0))
-        dock_deck_height_m = float(self.standards.get("site", {}).get("dock_height_m", DOCK_HEIGHT_M))
+        dock_deck_height_m = self._site_value("dock_height_m")
         parking_guides = self._parking_guide_points(structures or [])
         self._orient_rear_cameras_by_dock_layout(rear_cameras, shell_area)
         dock_walls = self._dock_wall_x_by_side(rear_cameras, structures or [], shell_area)
@@ -5825,7 +6064,7 @@ class RuleEngine:
         pad_x = 3500.0
         pad_y = 2500.0
         yard_elevation = float(site.get("yard_ground_elevation_m", 0.0))
-        dock_height = float(site.get("dock_height_m", DOCK_HEIGHT_M))
+        dock_height = float(site.get("dock_height_m") or self._site_value("dock_height_m") or 0.0)
         areas = [
             self._rect_area(
                 "area_truck_yard",
@@ -6022,11 +6261,38 @@ class RuleEngine:
             "warnings": warnings,
         }
 
+    @staticmethod
+    def _display_source(path: Any) -> str | None:
+        """把内部配置路径转成**不含本机绝对路径**的展示值。
+
+        语义结果会随导出/分享外发，因此这里只保留仓库内相对路径或文件名，
+        避免把安装位置（如 /Users/<name>/...）写进导出内容。
+        """
+        if path is None:
+            return None
+        text = str(path)
+        if not text:
+            return None
+        candidate = Path(text)
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        for root in (Path(__file__).resolve().parents[1].parent, Path(__file__).resolve().parents[1]):
+            try:
+                return resolved.relative_to(root.resolve()).as_posix()
+            except (OSError, ValueError):
+                continue
+        if candidate.is_absolute():
+            return candidate.name
+        return candidate.as_posix()
+
     def _parse_capability_summary(self) -> dict[str, Any]:
         standards = self.layer_render_standards or {}
         modules = standards.get("module_standards") or {}
         return {
-            "source": str(self.layer_render_standards_path),
+            # 只暴露仓库内相对路径/文件名，不回显本机安装路径
+            "source": self._display_source(self.layer_render_standards_path),
             "version": standards.get("version"),
             "status": standards.get("status"),
             "site_profiles": self.site_profiles,
@@ -6206,15 +6472,16 @@ class RuleEngine:
                 "evidence": ap_labels[:20],
             },
             "fisheye": {
-                "label_prefixes": ("YY",),
+                # 编号前缀来自本机私有配置；未配置时不做前缀枚举
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.fisheye")),
                 "source_when_found": "cad_fisheye_label_range_or_label_text",
             },
             "dome_camera": {
-                "label_prefixes": ("BG", "OA"),
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.dome")),
                 "source_when_found": "cad_dome_label_text",
             },
             "rear_camera": {
-                "label_prefixes": ("CW", "GX", "CD", "WH", "WW", "KW"),
+                "label_prefixes": tuple(self._adaptation_prefixes("camera.rear")),
                 "source_when_found": "cad_camera_label_range_or_label_text",
             },
             "spotlight": {
@@ -6409,7 +6676,17 @@ class RuleEngine:
         fisheye_count = count_devices(lambda d: d.get("type") == "security.camera.fisheye")
         dome_count = count_devices(lambda d: d.get("type") == "security.camera.dome")
         bullet_count = count_devices(bullet_predicate)
-        items = [
+        if self._is_generic_mode():
+            items = [
+                ("cameras", "摄像头", count_devices(lambda d: str(d.get("type", "")).startswith("security.camera")), 0, "observed"),
+                ("aps", "无线AP设备", ap_count, 0, "observed"),
+                ("cabinets", "机柜设备", count_devices(lambda d: d.get("type") == "network.cabinet"), 0, "observed"),
+                ("power", "配电设备", count_devices(lambda d: str(d.get("type", "")).startswith("power.")), 0, "observed"),
+                ("lighting", "照明设备", count_devices(lambda d: str(d.get("type", "")).startswith("lighting.")), 0, "observed"),
+                ("cables", "线路", len(cables), 0, "observed"),
+            ]
+        else:
+            items = [
             ("warehouse_shell", "仓库主体", 1 if shell_area else 0, 1, "minimum"),
             ("cameras_fisheye", "鱼眼设备", fisheye_count, expected.get("fisheye", 0), "inventory"),
             ("coverage_fisheye", "鱼眼覆盖", count_devices(lambda d: d.get("type") == "security.camera.fisheye" and self._has_radius_coverage(d)), expected.get("fisheye", 0), "inventory"),
@@ -6431,13 +6708,17 @@ class RuleEngine:
         checklist: list[dict[str, Any]] = []
         for key, label, actual, expected_count, mode in items:
             expected_value = int(expected_count or 0)
-            required = expected_value if mode == "inventory" else max(expected_value, 1)
-            if actual < required:
-                status = "missing"
-            elif mode == "inventory" and actual > expected_value:
-                status = "extra_detected"
-            else:
+            if mode == "observed":
                 status = "ok"
+                required = 0
+            else:
+                required = expected_value if mode == "inventory" else max(expected_value, 1)
+                if actual < required:
+                    status = "missing"
+                elif mode == "inventory" and actual > expected_value:
+                    status = "extra_detected"
+                else:
+                    status = "ok"
             checklist.append(
                 {
                     "key": key,
@@ -7835,11 +8116,13 @@ class RuleEngine:
 
     def _vehicle_template_sequence(self, count: int) -> list[dict[str, Any]]:
         standards = self.standards.get("vehicles", {})
+        # 说明：车型序列的分配权重若来自某场地图例数量，属场地数值，已移出公共代码。
+        # 这里不再内置任何计数：未配置时按**等权**处理。
         if not standards:
             standards = {
-                "box_4_2": {"label": "4.2M 箱式货车", "legend_count": 86, "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
-                "box_9_6": {"label": "9.6M 箱式货车", "legend_count": 65, "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
-                "container_61ft": {"label": "61尺 集卡", "legend_count": 59, "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
+                "box_4_2": {"label": "4.2M 箱式货车", "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
+                "box_9_6": {"label": "9.6M 箱式货车", "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
+                "container_61ft": {"label": "61尺 集卡", "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
             }
         ordered = [
             {"id": key, **value}
@@ -7848,18 +8131,25 @@ class RuleEngine:
         ]
         if not ordered:
             ordered = [
-                {"id": "box_4_2", "label": "4.2M 箱式货车", "legend_count": 86, "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
-                {"id": "box_9_6", "label": "9.6M 箱式货车", "legend_count": 65, "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
-                {"id": "container_61ft", "label": "61尺 集卡", "legend_count": 59, "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
+                {"id": "box_4_2", "label": "4.2M 箱式货车", "length_m": 4.2, "width_m": 2.05, "height_m": 2.65},
+                {"id": "box_9_6", "label": "9.6M 箱式货车", "length_m": 9.6, "width_m": 2.45, "height_m": 3.65},
+                {"id": "container_61ft", "label": "61尺 集卡", "length_m": 18.6, "width_m": 2.5, "height_m": 4.1},
             ]
-        total_weight = sum(float(item.get("legend_count", 1)) for item in ordered) or len(ordered)
+        # 权重优先级：本机私有配置 > 公开 standards > 等权 1.0
+        weights = [
+            self._vehicle_legend_weight(str(item.get("id")))
+            if self.adaptations.legend_count(str(item.get("id"))) is not None
+            else float(item.get("legend_count") or 1.0)
+            for item in ordered
+        ]
+        total_weight = sum(weights) or len(ordered)
         sequence: list[dict[str, Any]] = []
         remaining = count
         for idx, item in enumerate(ordered):
             if idx == len(ordered) - 1:
                 item_count = remaining
             else:
-                item_count = int(round(count * float(item.get("legend_count", 1)) / total_weight))
+                item_count = int(round(count * weights[idx] / total_weight))
                 item_count = max(0, min(item_count, remaining))
             sequence.extend([item] * item_count)
             remaining -= item_count
@@ -8157,7 +8447,7 @@ class RuleEngine:
             text = re.sub(r"\s+", "", raw_text.upper())
             oa_match = re.fullmatch(r"OA-(\d{1,3})", text)
             bg_camera_match = re.fullmatch(r"BG-(\d{1,3})", text)
-            bg_ap_match = re.fullmatch(r"(?:BFR|BGL)-[A-Z0-9-]+-BG-AP-(\d{1,3})", text)
+            bg_ap_match = self._adaptation_fullmatch_any("office_ap", text)
             if "办公室" in raw_text and "集装箱" in raw_text:
                 container_seeds.append(folded_position)
                 container_related_seeds.append(folded_position)
@@ -8243,10 +8533,12 @@ class RuleEngine:
                 }
             ]
             office_model = {"floors": floors, "objects": []}
-            self._apply_generic_gatehouse_confirmed_floor_contract(floors)
+            if not self._is_generic_mode():
+                self._apply_generic_gatehouse_confirmed_floor_contract(floors)
             office_model["objects"] = self._extract_office_objects(entities, office_model)
-            office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
-            office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
+            if not self._is_generic_mode():
+                office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
+                office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
             return office_model
 
         has_explicit_mezzanine_title = bool(level2_title_seeds)
@@ -8304,11 +8596,13 @@ class RuleEngine:
             },
         ]
         office_model = {"floors": floors, "objects": []}
-        self._apply_generic_gatehouse_confirmed_floor_contract(floors)
+        if not self._is_generic_mode():
+            self._apply_generic_gatehouse_confirmed_floor_contract(floors)
         office_model["objects"] = self._extract_office_objects(entities, office_model)
-        office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
-        office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
-        office_model["objects"].extend(self._infer_conveyor_dws_objects(entities))
+        if not self._is_generic_mode():
+            office_model["objects"] = self._tag_confirmed_gatehouse_office_objects(office_model["objects"], office_model)
+            office_model["objects"] = self._apply_generic_gatehouse_generation_rules(office_model["objects"], office_model, entities)
+            office_model["objects"].extend(self._infer_conveyor_dws_objects(entities))
         return office_model
 
     def _infer_gatehouse_office_model(self, entities: list[dict[str, Any]]) -> dict[str, Any]:
@@ -8574,7 +8868,7 @@ class RuleEngine:
                     or "钢化玻璃隔断" in raw_text
                     or "空调小室" in raw_text
                     or re.fullmatch(r"BG-?\d{1,3}", compact) is not None
-                    or (AP_LABEL_PATTERN.fullmatch(compact) and "-BG-AP-" in compact)
+                    or (self._matches_adaptation_label("ap", compact) and self._label_has_adaptation_token(compact))
                 )
             )
             if is_upper_main_plan_anchor:
@@ -8636,12 +8930,11 @@ class RuleEngine:
             result[tower_key] = bbox
         return result
 
-    @staticmethod
-    def _is_gatehouse_main_plan_device_label(raw_text: str) -> bool:
+    def _is_gatehouse_main_plan_device_label(self, raw_text: str) -> bool:
         compact = re.sub(r"\s+", "", raw_text.upper())
         if re.fullmatch(r"BG-\d{1,3}", compact):
             return True
-        if AP_LABEL_PATTERN.fullmatch(compact) and "-BG-AP-" in compact:
+        if self._matches_adaptation_label("ap", compact) and self._label_has_adaptation_token(compact):
             return True
         return compact in {"机房", "42U机柜", "UPS电源"}
 
@@ -10707,7 +11000,7 @@ class RuleEngine:
                 is_strong_office = (
                     normalized_text.startswith("OA-")
                     or normalized_text.startswith("BG-")
-                    or re.fullmatch(r"(?:BFR|BGL)-[A-Z0-9-]+-BG-AP-\d{1,3}", normalized_text) is not None
+                    or self._adaptation_fullmatch_any("office_ap", normalized_text) is not None
                     or self._rack_units_from_text(text) is not None
                     or layer == "TK"
                 )
@@ -10765,7 +11058,7 @@ class RuleEngine:
                     point["y"] - 1200.0,
                     point["x"] + 1800.0,
                     point["y"] + 1200.0,
-                    {"height_m": DOCK_HEIGHT_M, "source": "STRS升降平台/月台图层"},
+                    {"source": "STRS升降平台/月台图层", **({"height_m": self._site_value("dock_height_m")} if self._site_value("dock_height_m") is not None else {})},
                 )
             )
         return areas
@@ -10833,9 +11126,12 @@ class RuleEngine:
                 }
             )
 
+        # 托盘/桥架判定阈值属场地数值：未配置时不设阈值（不回落内置值）
+        tray_min_segment_mm = self._site_value("tray_min_segment_mm")
+        tray_tolerance_mm = self._site_value("tray_label_tolerance_mm")
         segments: list[dict[str, Any]] = []
         for axis in ("x", "y"):
-            for cluster in self._cluster_markers(markers, axis):
+            for cluster in self._cluster_markers(markers, axis, tray_tolerance_mm):
                 ordered = sorted(cluster, key=lambda item: item["position"]["y" if axis == "x" else "x"])
                 for start, end in zip(ordered, ordered[1:]):
                     p1 = start["position"]
@@ -10847,7 +11143,7 @@ class RuleEngine:
                         avg_y = (p1["y"] + p2["y"]) / 2.0
                         points = [{"x": p1["x"], "y": avg_y}, {"x": p2["x"], "y": avg_y}]
                     length_mm = line_length(points)
-                    if length_mm < TRAY_MIN_SEGMENT_MM:
+                    if tray_min_segment_mm is not None and length_mm < tray_min_segment_mm:
                         continue
                     segments.append(
                         {
@@ -10867,8 +11163,9 @@ class RuleEngine:
                     )
         return self._dedup_linear_items(segments)
 
-    @staticmethod
-    def _cluster_markers(markers: list[dict[str, Any]], axis: str) -> list[list[dict[str, Any]]]:
+    def _cluster_markers(
+        self, markers: list[dict[str, Any]], axis: str, tolerance_mm: float | None = None
+    ) -> list[list[dict[str, Any]]]:
         if not markers:
             return []
         ordered = sorted(markers, key=lambda item: item["position"][axis])
@@ -10877,7 +11174,7 @@ class RuleEngine:
         current_value = ordered[0]["position"][axis]
         for marker in ordered[1:]:
             value = marker["position"][axis]
-            if abs(value - current_value) <= TRAY_LABEL_TOLERANCE_MM:
+            if tolerance_mm is None or abs(value - current_value) <= tolerance_mm:
                 current.append(marker)
                 current_value = sum(item["position"][axis] for item in current) / len(current)
             else:
@@ -11215,7 +11512,7 @@ class RuleEngine:
                 self._frame(
                     frame_id="frame_main_plan",
                     kind="main_plan",
-                    title=main_rect.get("title") or "现方案主平面",
+                    title=main_rect.get("title") or MAIN_PLAN_TITLE,
                     bounds=main_rect["bounds"],
                     source=main_rect.get("source") or "cad_plan_frame",
                     source_entity_id=main_rect.get("source_entity_id"),
@@ -11489,14 +11786,14 @@ class RuleEngine:
         if not plan_rects:
             return None
         if len(plan_rects) == 1:
-            return {**plan_rects[0], "title": "现方案主平面", "source": "single_plan_frame"}
+            return {**plan_rects[0], "title": MAIN_PLAN_TITLE, "source": "single_plan_frame"}
         main_seeds: list[dict[str, Any]] = []
         for entity in entities:
             if entity.get("entity_type") not in {"TEXT", "MTEXT"}:
                 continue
             text = str(entity.get("text") or "")
             normalized = re.sub(r"\s+", "", text)
-            if not any(keyword in normalized for keyword in ("面积变化", "现方案", "当前方案", "新方案", "方案0703", "IT弱电规划")):
+            if not self._matches_project_name_keyword(normalized):
                 continue
             position = entity.get("geometry", {}).get("position")
             if position:
@@ -11508,10 +11805,10 @@ class RuleEngine:
             contains_seed = any(self._point_in_bounds(seed["position"], bounds, pad_mm=10_000.0) for seed in main_seeds)
             candidate = {**rect}
             if contains_seed:
-                candidate["title"] = "现方案主平面"
+                candidate["title"] = MAIN_PLAN_TITLE
                 candidate["source"] = "cad_plan_frame_contains_current_scheme_note"
             else:
-                candidate.setdefault("title", "现方案主平面")
+                candidate.setdefault("title", MAIN_PLAN_TITLE)
                 candidate.setdefault("source", "cad_plan_frame_max_x")
             scored.append(
                 (
@@ -12111,8 +12408,8 @@ class RuleEngine:
             if not normalized:
                 continue
             if (
-                re.search(r"\b(CW|GX|YY|WH|WW|CD|OA)-\d{1,3}\b", normalized)
-                or AP_LABEL_PATTERN.search(normalized)
+                self._search_adaptation_range_any(normalized)
+                or self._search_adaptation_label("ap", normalized)
                 or "机柜" in text
             ):
                 seeds.append(position)
@@ -12375,12 +12672,12 @@ class RuleEngine:
             }
         return None
 
-    @staticmethod
-    def _is_device_cable_layer(layer: str) -> bool:
+    def _is_device_cable_layer(self, layer: str) -> bool:
         if not layer:
             return False
         upper = layer.upper()
-        return any(keyword.upper() in upper for keyword in DEVICE_CABLE_LAYER_KEYWORDS)
+        keywords = list(DEVICE_CABLE_LAYER_KEYWORDS) + list(self._extra_layer_keywords())
+        return any(keyword.upper() in upper for keyword in keywords)
 
     def _filter_cable_candidates(
         self, candidates: list[dict[str, Any]]

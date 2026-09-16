@@ -18,6 +18,8 @@ export class ProjectManager {
     this.scopeProjectId = scopeProjectId;
     this.onSelect = null;
     this.defaultName = "未命名弱电项目";
+    this.expandedIds = new Set();
+    this.activeId = null;
     this.cancelButton.addEventListener("click", () => this.close(null));
     this.confirmButton.addEventListener("click", () => this.confirm());
   }
@@ -101,19 +103,46 @@ export class ProjectManager {
       return;
     }
     container.innerHTML = toolbar + projects
-      .map(
-        (project) => `<div class="project-item${isArchived(project) ? " archived" : ""}" data-project="${project.id}">
-          <strong>${escapeHtml(project.name)}${isArchived(project) ? '<em class="project-status">已归档</em>' : ""}</strong>
-          <span>${project.drawings?.length || 0} 张图纸 · ${escapeHtml(project.save_dir || "")}</span>
-          ${options.showActions ? this.renderActions(project) : ""}
-        </div>`,
-      )
+      .map((project) => {
+        const expanded = this.expandedIds.has(project.id);
+        const drawingCount = project.drawings?.length || 0;
+        const fullPath = project.save_dir || "";
+        const active = this.activeId === project.id;
+        return `<div class="project-item${isArchived(project) ? " archived" : ""}${expanded ? " expanded" : ""}${active ? " active" : ""}" data-project="${project.id}">
+          <div class="project-item-head">
+            <strong>${escapeHtml(project.name)}${isArchived(project) ? '<em class="project-status">已归档</em>' : ""}</strong>
+            ${options.showActions ? `<div class="project-item-actions">${this.renderActionButtons(project)}
+            <button type="button" class="project-meta-toggle" data-project-meta-toggle data-project-id="${project.id}" aria-expanded="${expanded ? "true" : "false"}" title="显示图纸数量和目录">详情</button>
+            </div>` : `<button type="button" class="project-meta-toggle" data-project-meta-toggle data-project-id="${project.id}" aria-expanded="${expanded ? "true" : "false"}" title="显示图纸数量和目录">详情</button>`}
+          </div>
+          <div class="project-item-meta">
+            <span>${drawingCount} 张图纸</span>
+            ${fullPath ? `<span class="project-item-path" title="${escapeHtml(fullPath)}">${escapeHtml(shortProjectPath(fullPath))}</span>` : ""}
+          </div>
+        </div>`;
+      })
       .join("");
     this.bindToolbar(container);
     container.querySelectorAll("[data-project]").forEach((item) => {
       item.addEventListener("click", () => {
         const project = this.projects.find((candidate) => candidate.id === item.dataset.project);
         if (project && onSelect) onSelect(project);
+      });
+    });
+    container.querySelectorAll("[data-project-meta-toggle]").forEach((button) => {
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const projectId = button.dataset.projectId;
+        const card = button.closest(".project-item");
+        if (this.expandedIds.has(projectId)) {
+          this.expandedIds.delete(projectId);
+          card?.classList.remove("expanded");
+          button.setAttribute("aria-expanded", "false");
+        } else {
+          this.expandedIds.add(projectId);
+          card?.classList.add("expanded");
+          button.setAttribute("aria-expanded", "true");
+        }
       });
     });
     container.querySelectorAll("[data-project-action]").forEach((button) => {
@@ -125,16 +154,19 @@ export class ProjectManager {
     });
   }
 
-  renderActions(project) {
+  setActive(projectId) {
+    this.activeId = projectId || null;
+    this.list?.querySelectorAll("[data-project]").forEach((item) => {
+      item.classList.toggle("active", item.dataset.project === this.activeId);
+    });
+  }
+
+  renderActionButtons(project) {
     if (isArchived(project)) {
-      return `<div class="project-actions">
-        <button type="button" data-project-action="restore" data-project-id="${project.id}">恢复</button>
-        <button type="button" data-project-action="delete" data-project-id="${project.id}">删除</button>
-      </div>`;
+      return `<button type="button" data-project-action="restore" data-project-id="${project.id}">恢复</button>
+        <button type="button" data-project-action="delete" data-project-id="${project.id}">删除</button>`;
     }
-    return `<div class="project-actions">
-      <button type="button" data-project-action="archive" data-project-id="${project.id}">归档</button>
-    </div>`;
+    return `<button type="button" data-project-action="archive" data-project-id="${project.id}">归档</button>`;
   }
 
   bindToolbar(container) {
@@ -211,4 +243,10 @@ function escapeHtml(value) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;");
+}
+
+function shortProjectPath(value) {
+  const parts = String(value || "").split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return value;
+  return parts.slice(-2).join("/");
 }

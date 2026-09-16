@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+from collections import Counter
+from typing import Any
+
+
+DEVICE_FAMILY = {
+    "security.camera.fisheye": "camera",
+    "security.camera.dome": "camera",
+    "security.camera.bullet": "camera",
+    "security.camera.rear": "camera",
+    "security.camera": "camera",
+    "network.ap": "network",
+    "network.switch": "network",
+    "network.cabinet": "network",
+    "network.outlet": "network",
+    "power.distribution": "power",
+    "power.panel": "power",
+    "lighting.fixture": "lighting",
+}
+
+
+def count_by(items: list[dict[str, Any]], key: str = "type") -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for item in items or []:
+        counter[str(item.get(key) or "unknown")] += 1
+    return dict(sorted(counter.items(), key=lambda pair: (-pair[1], pair[0])))
+
+
+def family_counts(devices: list[dict[str, Any]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for device in devices or []:
+        device_type = str(device.get("type") or "")
+        family = DEVICE_FAMILY.get(device_type)
+        if family is None:
+            if device_type.startswith("security.camera"):
+                family = "camera"
+            elif device_type.startswith("network."):
+                family = "network"
+            elif device_type.startswith("power."):
+                family = "power"
+            elif device_type.startswith("lighting."):
+                family = "lighting"
+            else:
+                family = "other"
+        counter[family] += 1
+    return dict(sorted(counter.items()))
+
+
+def collect_metrics(semantic: dict[str, Any]) -> dict[str, Any]:
+    devices = list(semantic.get("devices") or [])
+    cables = list(semantic.get("cables") or [])
+    structures = list(semantic.get("structures") or [])
+    areas = list(semantic.get("areas") or [])
+    stats = dict(semantic.get("stats") or {})
+    quality = semantic.get("quality") or {}
+    warnings = list(quality.get("warnings") or [])
+    inferred = list(quality.get("inferred") or [])
+    checklist = list(quality.get("render_checklist") or [])
+    review_needed = sum(
+        1
+        for item in [*devices, *cables]
+        if item.get("review_needed") or float(item.get("confidence") or 1) < 0.75
+    )
+    inferred_cables = sum(
+        1
+        for cable in cables
+        if "infer" in str((cable.get("attributes") or {}).get("source_kind") or cable.get("route_source") or "")
+    )
+    render_ready = bool(devices or structures or areas)
+    drawing_meta = semantic.get("drawing_meta") or {}
+    unit_resolution = semantic.get("unit_resolution") or {}
+    facts = semantic.get("geometry_facts") or {}
+    curved_entities = int(facts.get("curved_entities") or 0)
+    closed_entities = int(facts.get("closed_entities") or 0)
+    for item in [*devices, *cables, *structures, *areas]:
+        geometry = item.get("geometry") or {}
+        if str(geometry.get("type") or "") in {"Arc", "Circle", "Ellipse"} or item.get("has_arc_segments"):
+            curved_entities += 1
+        if geometry.get("closed"):
+            closed_entities += 1
+    return {
+        "schema_version": semantic.get("schema_version"),
+        "unit": {
+            # 优先用解析器报告的原始单位信息；semantic 的 unit_resolution 由 API 层补写。
+            "name": unit_resolution.get("unit_name") or drawing_meta.get("unit_name"),
+            "scale_to_mm": unit_resolution.get("unit_scale_to_mm") or drawing_meta.get("unit_scale_to_mm"),
+            "specified": not bool(
+                unit_resolution.get("unit_unspecified", drawing_meta.get("unit_unspecified"))
+            ),
+            "unspecified": bool(unit_resolution.get("unit_unspecified", drawing_meta.get("unit_unspecified"))),
+            "source": unit_resolution.get("unit_source") or drawing_meta.get("unit_source"),
+        },
+        "geometry_facts": facts,
+        "curved_entity_count": curved_entities,
+        "closed_entity_count": closed_entities,
+        "site_profiles": list(semantic.get("site_profiles") or []),
+        "stats": {
+            "total_entities": stats.get("total_entities"),
+            "devices": len(devices),
+            "cables": len(cables),
+            "cable_candidates": stats.get("cable_candidates") or len(semantic.get("cable_candidates") or []),
+            "structures": len(structures),
+            "areas": len(areas),
+            "office_objects": stats.get("office_objects") or len(semantic.get("office_objects") or []),
+            "parking_spaces": stats.get("parking_spaces") or len(semantic.get("parking_spaces") or []),
+            "fixtures": stats.get("fixtures") or len(semantic.get("fixtures") or []),
+            "frames": stats.get("frames") or len(semantic.get("frames") or []),
+            "unknown": stats.get("unknown"),
+            "review_needed": review_needed,
+        },
+        "devices_by_type": count_by(devices),
+        "device_families": family_counts(devices),
+        "cables_by_type": count_by(cables),
+        "structures_by_type": count_by(structures),
+        "areas_by_type": count_by(areas),
+        "inferred_cables": inferred_cables,
+        "warnings": warnings,
+        "inferred": inferred,
+        "checklist_missing": [item.get("label") for item in checklist if item.get("status") == "missing"],
+        "checklist_extra": [item.get("label") for item in checklist if item.get("status") == "extra_detected"],
+        "active_rule_sets": semantic.get("active_rule_sets") or quality.get("active_rule_sets") or [],
+        "render_ready": render_ready,
+        "has_strong_current": bool(
+            family_counts(devices).get("power") or family_counts(devices).get("lighting")
+        ),
+        "source_file": (semantic.get("drawing_meta") or {}).get("source_file")
+        or (semantic.get("drawing_meta") or {}).get("original_name"),
+    }
+
+
+def compare_targets(metrics: dict[str, Any], target: dict[str, Any] | None, label: str = "desired") -> dict[str, Any]:
+    if not target:
+        return {"enabled": False, "passed": True, "gaps": []}
+    gaps: list[str] = []
+    actual_types = metrics.get("devices_by_type") or {}
+    for device_type, minimum in (target.get("devices_by_type") or {}).items():
+        actual = int(actual_types.get(device_type) or 0)
+        if actual < int(minimum):
+            gaps.append(f"{device_type}: actual={actual} {label}>={minimum}")
+    stats = metrics.get("stats") or {}
+    if target.get("cables_min") is not None and int(stats.get("cables") or 0) < int(target["cables_min"]):
+        gaps.append(f"cables: actual={stats.get('cables')} {label}>={target['cables_min']}")
+    if target.get("structures_min") is not None and int(stats.get("structures") or 0) < int(target["structures_min"]):
+        gaps.append(f"structures: actual={stats.get('structures')} {label}>={target['structures_min']}")
+    if target.get("devices_min") is not None and int(stats.get("devices") or 0) < int(target["devices_min"]):
+        gaps.append(f"devices: actual={stats.get('devices')} {label}>={target['devices_min']}")
+    if target.get("devices_max") is not None and int(stats.get("devices") or 0) > int(target["devices_max"]):
+        gaps.append(f"devices: actual={stats.get('devices')} {label}<={target['devices_max']}")
+    if target.get("empty") and int(stats.get("devices") or 0) + int(stats.get("cables") or 0) + int(stats.get("structures") or 0) != 0:
+        gaps.append(
+            f"empty: 期望空图，实际 devices={stats.get('devices')} cables={stats.get('cables')} "
+            f"structures={stats.get('structures')}"
+        )
+    if target.get("render_ready") and not metrics.get("render_ready"):
+        gaps.append("render_ready: 3D 输入为空")
+    unit = metrics.get("unit") or {}
+    if target.get("unit") is not None and unit.get("name") != target["unit"]:
+        gaps.append(f"unit: actual={unit.get('name')} {label}={target['unit']}")
+    if target.get("unit_scale_to_mm") is not None:
+        actual_scale = unit.get("scale_to_mm")
+        expected_scale = float(target["unit_scale_to_mm"])
+        if actual_scale is None or abs(float(actual_scale) - expected_scale) > 1e-9:
+            gaps.append(f"unit_scale_to_mm: actual={actual_scale} {label}={expected_scale}")
+    if target.get("unit_unspecified") is not None and bool(unit.get("unspecified")) != bool(target["unit_unspecified"]):
+        gaps.append(f"unit_unspecified: actual={unit.get('unspecified')} {label}={target['unit_unspecified']}")
+    if target.get("has_strong_current") is not None and bool(metrics.get("has_strong_current")) != bool(target["has_strong_current"]):
+        gaps.append(f"has_strong_current: actual={metrics.get('has_strong_current')} {label}={target['has_strong_current']}")
+    if target.get("curved_entities_min") is not None:
+        actual_curved = int(metrics.get("curved_entity_count") or 0)
+        if actual_curved < int(target["curved_entities_min"]):
+            gaps.append(f"curved_entities: actual={actual_curved} {label}>={target['curved_entities_min']}")
+    if target.get("closed_entities_min") is not None:
+        actual_closed = int(metrics.get("closed_entity_count") or 0)
+        if actual_closed < int(target["closed_entities_min"]):
+            gaps.append(f"closed_entities: actual={actual_closed} {label}>={target['closed_entities_min']}")
+    return {"enabled": True, "passed": not gaps, "gaps": gaps}
+
+
+def compare_desired(metrics: dict[str, Any], desired: dict[str, Any] | None) -> dict[str, Any]:
+    return compare_targets(metrics, desired, "desired")

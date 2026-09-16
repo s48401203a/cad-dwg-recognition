@@ -1,6 +1,10 @@
 version: "0.1"
-default_profiles: ["express"]
+default_profiles: ["generic"]
 profiles:
+  - id: "generic"
+    file: "generic.yaml"
+    display_name: "通用强弱电"
+    site_type: "generic"
   - id: "express"
     file: "express.yaml"
     display_name: "快运场地"

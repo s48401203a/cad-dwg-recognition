@@ -28,13 +28,19 @@ block_rules:
   network.outlet:
     keywords: [信息点, RJ45, DATA, 网口, 信息插座]
     confidence: 0.90
+  power.distribution:
+    keywords: [配电箱, 配电柜, 配电, PDB, 电箱]
+    confidence: 0.93
+  lighting.fixture:
+    keywords: [筒灯, 照明灯, 灯具, 照明]
+    confidence: 0.90
 
 layer_rules:
   cable.security:
-    keywords: [IT弱电规划-摄像机, CCTV, 监控, 摄像头, CAM, IPC]
+    keywords: [CCTV, 监控, 摄像头, CAM, IPC]
     confidence: 0.88
   cable.network:
-    keywords: [IT弱电规划-网络&广播, 网络, 网线, CAT6, UTP, RJ45, AP, WIFI, 无线, WIRELESS]
+    keywords: [网络, 网线, CAT6, UTP, RJ45, AP, WIFI, 无线, WIRELESS]
     confidence: 0.84
   cable.trunk:
     keywords: [桥架, TRAY, 线槽, CABLETRAY, 弱电管线, 管线]
@@ -42,6 +48,12 @@ layer_rules:
   cable.fiber:
     keywords: [光纤, FIBER, FO, 光缆]
     confidence: 0.85
+  cable.power:
+    keywords: [强电, 强电桥架, 动力, POWER, 配电干线]
+    confidence: 0.94
+  cable.lighting:
+    keywords: [照明回路, 照明桥架]
+    confidence: 0.93
   cable.unknown:
     keywords: ["247", "240", "20", "21", "22", "23", "151", "28"]
     confidence: 0.40
@@ -65,6 +77,12 @@ native_cable_layer_rules:
   cable.cascade:
     keywords: [级联, CASCADE, UPLINK]
     confidence: 0.84
+  cable.power:
+    keywords: [强电, 强电桥架, 动力, POWER, 配电干线]
+    confidence: 0.94
+  cable.lighting:
+    keywords: [照明回路, 照明桥架]
+    confidence: 0.93
 
 native_cable_fallback_layers:
   - layer: CABLETRAY_DIM
@@ -110,6 +128,11 @@ structure_rules:
       - "00-原始墙体"
       - "1200护墙"
       - "防火分区示意"
+      - "墙"
+      - "墙体"
+      - "墙体层"
+      - "WALL"
+      - "Walls"
     entity_types: [LINE, LWPOLYLINE, POLYLINE]
     confidence: 0.90
   building.column:

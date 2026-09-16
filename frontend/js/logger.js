@@ -1,3 +1,5 @@
+import { accessToken } from "./api.js";
+
 export class Logger {
   constructor(panel) {
     this.panel = panel;
@@ -8,7 +10,9 @@ export class Logger {
 
   connect() {
     const protocol = location.protocol === "https:" ? "wss" : "ws";
-    this.socket = new WebSocket(`${protocol}://${location.host}/ws/logs`);
+    const token = accessToken();
+    const query = token ? `?token=${encodeURIComponent(token)}` : "";
+    this.socket = new WebSocket(`${protocol}://${location.host}/ws/logs${query}`);
     this.socket.addEventListener("open", () => this.add("INFO", "日志通道已连接"));
     this.socket.addEventListener("message", (event) => {
       try {

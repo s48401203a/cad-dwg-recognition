@@ -1,5 +1,7 @@
 # Local runtime state
 .cad-server.json
+.cad-runtime/
+.tmp-verify/
 .codex-tmp/
 .claude/
 codex/
@@ -54,6 +56,7 @@ stop-project.command
 
 # Python
 __pycache__/
+.pytest_cache/
 *.py[cod]
 .venv/
 venv/

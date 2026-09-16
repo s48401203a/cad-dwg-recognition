@@ -1,0 +1,7 @@
+# 测试与开发依赖（与 requirements.txt 分开，避免把测试依赖装进运行环境）。
+#
+# 说明：`fastapi.testclient` 需要 httpx；缺少它时 HTTP 层测试会直接报
+# "install httpx2" 而不是静默跳过，因此这里显式固定。
+-r requirements.txt
+httpx>=0.27,<1.0
+pytest>=8.0,<10.0

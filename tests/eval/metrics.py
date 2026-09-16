@@ -68,8 +68,32 @@ def collect_metrics(semantic: dict[str, Any]) -> dict[str, Any]:
         if "infer" in str((cable.get("attributes") or {}).get("source_kind") or cable.get("route_source") or "")
     )
     render_ready = bool(devices or structures or areas)
+    drawing_meta = semantic.get("drawing_meta") or {}
+    unit_resolution = semantic.get("unit_resolution") or {}
+    facts = semantic.get("geometry_facts") or {}
+    curved_entities = int(facts.get("curved_entities") or 0)
+    closed_entities = int(facts.get("closed_entities") or 0)
+    for item in [*devices, *cables, *structures, *areas]:
+        geometry = item.get("geometry") or {}
+        if str(geometry.get("type") or "") in {"Arc", "Circle", "Ellipse"} or item.get("has_arc_segments"):
+            curved_entities += 1
+        if geometry.get("closed"):
+            closed_entities += 1
     return {
         "schema_version": semantic.get("schema_version"),
+        "unit": {
+            # 优先用解析器报告的原始单位信息；semantic 的 unit_resolution 由 API 层补写。
+            "name": unit_resolution.get("unit_name") or drawing_meta.get("unit_name"),
+            "scale_to_mm": unit_resolution.get("unit_scale_to_mm") or drawing_meta.get("unit_scale_to_mm"),
+            "specified": not bool(
+                unit_resolution.get("unit_unspecified", drawing_meta.get("unit_unspecified"))
+            ),
+            "unspecified": bool(unit_resolution.get("unit_unspecified", drawing_meta.get("unit_unspecified"))),
+            "source": unit_resolution.get("unit_source") or drawing_meta.get("unit_source"),
+        },
+        "geometry_facts": facts,
+        "curved_entity_count": curved_entities,
+        "closed_entity_count": closed_entities,
         "site_profiles": list(semantic.get("site_profiles") or []),
         "stats": {
             "total_entities": stats.get("total_entities"),
@@ -119,8 +143,37 @@ def compare_targets(metrics: dict[str, Any], target: dict[str, Any] | None, labe
         gaps.append(f"cables: actual={stats.get('cables')} {label}>={target['cables_min']}")
     if target.get("structures_min") is not None and int(stats.get("structures") or 0) < int(target["structures_min"]):
         gaps.append(f"structures: actual={stats.get('structures')} {label}>={target['structures_min']}")
+    if target.get("devices_min") is not None and int(stats.get("devices") or 0) < int(target["devices_min"]):
+        gaps.append(f"devices: actual={stats.get('devices')} {label}>={target['devices_min']}")
+    if target.get("devices_max") is not None and int(stats.get("devices") or 0) > int(target["devices_max"]):
+        gaps.append(f"devices: actual={stats.get('devices')} {label}<={target['devices_max']}")
+    if target.get("empty") and int(stats.get("devices") or 0) + int(stats.get("cables") or 0) + int(stats.get("structures") or 0) != 0:
+        gaps.append(
+            f"empty: 期望空图，实际 devices={stats.get('devices')} cables={stats.get('cables')} "
+            f"structures={stats.get('structures')}"
+        )
     if target.get("render_ready") and not metrics.get("render_ready"):
         gaps.append("render_ready: 3D 输入为空")
+    unit = metrics.get("unit") or {}
+    if target.get("unit") is not None and unit.get("name") != target["unit"]:
+        gaps.append(f"unit: actual={unit.get('name')} {label}={target['unit']}")
+    if target.get("unit_scale_to_mm") is not None:
+        actual_scale = unit.get("scale_to_mm")
+        expected_scale = float(target["unit_scale_to_mm"])
+        if actual_scale is None or abs(float(actual_scale) - expected_scale) > 1e-9:
+            gaps.append(f"unit_scale_to_mm: actual={actual_scale} {label}={expected_scale}")
+    if target.get("unit_unspecified") is not None and bool(unit.get("unspecified")) != bool(target["unit_unspecified"]):
+        gaps.append(f"unit_unspecified: actual={unit.get('unspecified')} {label}={target['unit_unspecified']}")
+    if target.get("has_strong_current") is not None and bool(metrics.get("has_strong_current")) != bool(target["has_strong_current"]):
+        gaps.append(f"has_strong_current: actual={metrics.get('has_strong_current')} {label}={target['has_strong_current']}")
+    if target.get("curved_entities_min") is not None:
+        actual_curved = int(metrics.get("curved_entity_count") or 0)
+        if actual_curved < int(target["curved_entities_min"]):
+            gaps.append(f"curved_entities: actual={actual_curved} {label}>={target['curved_entities_min']}")
+    if target.get("closed_entities_min") is not None:
+        actual_closed = int(metrics.get("closed_entity_count") or 0)
+        if actual_closed < int(target["closed_entities_min"]):
+            gaps.append(f"closed_entities: actual={actual_closed} {label}>={target['closed_entities_min']}")
     return {"enabled": True, "passed": not gaps, "gaps": gaps}
 
 

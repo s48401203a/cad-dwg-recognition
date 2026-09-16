@@ -1,7 +1,42 @@
 const jsonHeaders = { "Content-Type": "application/json" };
+const TOKEN_STORAGE_KEY = "cad_access_token";
+
+// 访问令牌：由启动脚本通过 ?token=... 传入（局域网模式必须），回环模式通常为空。
+// 只保存在本机 localStorage，不写入日志、不发送到第三方。
+export function captureAccessToken() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    if (token) {
+      window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      params.delete("token");
+      const query = params.toString();
+      window.history.replaceState({}, "", `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`);
+    }
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function accessToken() {
+  try {
+    return window.localStorage.getItem(TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function withToken(options = {}) {
+  const token = accessToken();
+  if (!token) return options;
+  const headers = new Headers(options.headers || {});
+  if (!headers.has("X-CAD-Token")) headers.set("X-CAD-Token", token);
+  return { ...options, headers };
+}
 
 async function request(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, withToken(options));
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -16,7 +51,7 @@ async function request(url, options = {}) {
 }
 
 async function download(url) {
-  const response = await fetch(new URL(url, window.location.origin));
+  const response = await fetch(new URL(url, window.location.origin), withToken());
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }

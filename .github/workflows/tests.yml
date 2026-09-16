@@ -1,0 +1,45 @@
+name: tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: 安装依赖（含测试依赖）
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: 运行测试套件
+        # 不需要 ODA、不需要客户图纸、不读取任何本机业务目录：
+        # conftest 会把运行时目录指向临时目录，夹具全部由 tests/synthetic.py 生成。
+        run: python -m pytest tests/ -q
+
+      - name: 公开合成夹具严格评估
+        # --fixtures-only 只跑公开合成夹具；--strict 让 desired 缺口也视为失败。
+        run: python -m tests.eval.runner --fixtures-only --strict
+
+      - name: 上传评估报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cad-eval-report-py${{ matrix.python-version }}
+          path: exports/eval/latest/
+          if-no-files-found: ignore

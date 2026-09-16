@@ -1,4 +1,7 @@
-import { api } from "./api.js?v=53";
+import { api, captureAccessToken } from "./api.js?v=54";
+
+// 启动脚本可能通过 ?token=... 传入访问令牌（局域网模式必须）；先收敛再发请求。
+captureAccessToken();
 import { Logger } from "./logger.js";
 import { ProjectManager } from "./projectManager.js?v=6";
 import { SceneBuilder } from "./renderer/SceneBuilder.js?v=89";

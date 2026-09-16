@@ -1,4 +1,4 @@
-import { api, captureAccessToken } from "./api.js?v=54";
+import { api, captureAccessToken, accessToken, forgetAccessToken, onAuthRequired } from "./api.js?v=54";
 
 // 启动脚本可能通过 ?token=... 传入访问令牌（局域网模式必须）。
 // 必须在 Logger 连接 WebSocket 之前完成，否则 WS 会以无令牌状态握手而被拒绝。
@@ -143,7 +143,8 @@ const dom = {
 };
 
 const logger = new Logger(dom.logPanel);
-logger.connect();
+// 注意：这里**不**立刻连接日志通道。启用访问令牌时未认证的 WebSocket 握手会被拒绝，
+// 而浏览器的握手失败会在 console 里留下 error。改到认证完成后由 init() 调用。
 logger.onLine((line) => syncProgressFromLog(line));
 
 const scene = new SceneBuilder(dom.scene, dom.canvasWrap);
@@ -174,10 +175,191 @@ const projectManager = new ProjectManager({
   scopeProjectId: initialProjectTarget?.scoped ? initialProjectTarget.projectId : null,
 });
 
+// ---------------------------------------------------------------- 访问令牌认证
+//
+// 服务启用访问令牌（或局域网模式）后，所有 /api/**（白名单除外）与 /exports/** 都需要认证。
+// 这里负责：探测会话状态、在需要时弹出登录界面、登录成功后重新加载数据。
+// 令牌本身只保存在 localStorage（以及服务端的 HttpOnly 会话 cookie），不写入日志或分享链接。
+
+const authState = {
+  required: false,
+  authenticated: true,
+  overlay: null,
+  input: null,
+  error: null,
+  submit: null,
+  logout: null,
+  hint: null,
+  bootstrapped: false,
+};
+
+function authElements() {
+  return {
+    overlay: document.getElementById("authOverlay"),
+    input: document.getElementById("authTokenInput"),
+    error: document.getElementById("authError"),
+    submit: document.getElementById("authSubmitButton"),
+    logout: document.getElementById("authLogoutButton"),
+    hint: document.getElementById("authHint"),
+  };
+}
+
+function showAuthError(message) {
+  const { error } = authElements();
+  if (!error) return;
+  error.textContent = message;
+  error.hidden = !message;
+}
+
+async function bootstrapAuth() {
+  const { overlay, input, submit, logout, hint } = authElements();
+  authState.overlay = overlay;
+  authState.input = input;
+  authState.error = document.getElementById("authError");
+  authState.submit = submit;
+  authState.logout = logout;
+  authState.hint = hint;
+
+  let session;
+  try {
+    session = await api.authSession();
+  } catch (error) {
+    // 认证接口不可用时按"无需认证"处理，避免把本地模式锁死。
+    logger.add("WARNING", `无法确认认证状态: ${error.message}`);
+    authState.required = false;
+    authState.authenticated = true;
+    return true;
+  }
+
+  authState.required = Boolean(session.auth_required);
+  authState.authenticated = Boolean(session.authenticated);
+  if (logout) logout.hidden = !authState.required;
+  const topbarLogout = document.getElementById("logoutButton");
+  if (topbarLogout) topbarLogout.hidden = !authState.required;
+
+  if (!authState.required) {
+    if (overlay) overlay.hidden = true;
+    return true;
+  }
+
+  // 已有存储令牌但会话未建立：先尝试用令牌完成登录（例如刚由启动脚本带 ?token= 打开）。
+  if (!authState.authenticated && accessToken()) {
+    try {
+      await api.authLogin(accessToken());
+      authState.authenticated = true;
+    } catch {
+      forgetAccessToken();
+    }
+  }
+
+  if (authState.authenticated) {
+    if (overlay) overlay.hidden = true;
+    return true;
+  }
+
+  showAuthOverlay();
+  return false;
+}
+
+function showAuthOverlay() {
+  if (!authState.overlay) return;
+  authState.overlay.hidden = false;
+  showAuthError("");
+  if (authState.hint && !authState.hint.dataset.filled) {
+    const scope = window.location.origin;
+    authState.hint.dataset.filled = "1";
+    authState.hint.innerHTML =
+      "当前服务已启用访问控制（局域网模式或显式令牌）。请输入访问令牌后继续。" +
+      '<br />令牌只保存在本机浏览器，不写入日志，也不会出现在分享链接中。' +
+      `<br />当前地址：<code>${escapeHtml(scope)}</code>`;
+  }
+  window.setTimeout(() => authState.input?.focus(), 30);
+}
+
+function bindAuthEvents() {
+  const { submit, input, logout } = authElements();
+  authState.submit = submit;
+  authState.input = input;
+  authState.logout = logout;
+
+  const doLogin = async () => {
+    const value = (authState.input?.value || "").trim();
+    if (!value) {
+      showAuthError("请输入访问令牌");
+      return;
+    }
+    if (authState.submit) authState.submit.disabled = true;
+    showAuthError("");
+    try {
+      await api.authLogin(value);
+      try {
+        window.localStorage.setItem("cad_access_token", value);
+      } catch {
+        /* localStorage 不可用时仅依赖会话 cookie */
+      }
+      authState.authenticated = true;
+      if (authState.overlay) authState.overlay.hidden = true;
+      if (authState.input) authState.input.value = "";
+      logger.add("SUCCESS", "已通过访问令牌认证");
+      await loadAuthenticatedData();
+    } catch (error) {
+      forgetAccessToken();
+      logger.disconnect();
+      showAuthError(error.message || "登录失败，请检查访问令牌");
+      if (authState.overlay) authState.overlay.hidden = false;
+    } finally {
+      if (authState.submit) authState.submit.disabled = false;
+    }
+  };
+
+  const topbarLogout = document.getElementById("logoutButton");
+  const doLogout = async () => {
+    try {
+      await api.authLogout();
+    } catch {
+      /* 退出失败也继续清理本地状态 */
+    }
+    forgetAccessToken();
+    logger.disconnect();
+    authState.authenticated = false;
+    showAuthOverlay();
+    if (authState.input) authState.input.value = "";
+  };
+
+  authState.submit?.addEventListener("click", doLogin);
+  topbarLogout?.addEventListener("click", doLogout);
+  authState.input?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      doLogin();
+    }
+  });
+  authState.logout?.addEventListener("click", doLogout);
+
+  // 任何请求返回 401 时回到登录界面，凭据错误或过期都能恢复。
+  // 但不要清掉正在显示的错误提示，否则用户看不到"令牌不正确"这类反馈。
+  onAuthRequired(() => {
+    authState.authenticated = false;
+    const errorNode = document.getElementById("authError");
+    const hasVisibleError = errorNode && !errorNode.hidden && (errorNode.textContent || "").trim();
+    if (hasVisibleError) {
+      if (authState.overlay) authState.overlay.hidden = false;
+      return;
+    }
+    showAuthOverlay();
+  });
+}
+
 init();
 
 async function init() {
   document.body.classList.toggle("reverse-validation-mode", reverseValidationMode);
+  bindAuthEvents();
+  const authenticated = await bootstrapAuth();
+  if (!authenticated) {
+    logger.add("WARNING", "需要访问令牌：请在上方输入后继续");
+    return;
+  }
   restoreLayerPreferences();
   applySavedDisplayMode();
   applySavedFramePanelState();
@@ -188,6 +370,13 @@ async function init() {
   if (reverseValidationMode && !initialProjectTarget) {
     renderReverseValidationLanding();
   }
+  await loadAuthenticatedData();
+}
+
+/** 登录成功后（或无需认证时）加载服务状态与项目列表。 */
+async function loadAuthenticatedData() {
+  // 认证已通过（或本机无需认证），此时再建立日志通道。
+  logger.connect();
   try {
     const health = await api.health();
     logger.add("SUCCESS", `服务就绪，ODA ${health.oda_available ? "可用" : "未检测到"}`);

@@ -1958,3 +1958,123 @@ body.fullscreen-view .fullscreen-toggle {
     grid-template-columns: minmax(0, 1fr) 74px;
   }
 }
+
+/* ---------------------------------------------------------------- 访问令牌登录界面 */
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 10, 12, 0.82);
+  backdrop-filter: blur(3px);
+}
+
+.auth-overlay[hidden] {
+  display: none;
+}
+
+.auth-card {
+  width: min(440px, 100%);
+  padding: 26px 28px 22px;
+  border: 1px solid rgba(120, 200, 180, 0.28);
+  border-radius: 14px;
+  background: #0f1719;
+  color: #e6f1ee;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.auth-card h2 {
+  margin: 0 0 10px;
+  font-size: 19px;
+  letter-spacing: 0.02em;
+}
+
+.auth-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #9fb4b0;
+}
+
+.auth-field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.auth-field span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #9fb4b0;
+}
+
+.auth-field input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(140, 190, 180, 0.3);
+  border-radius: 8px;
+  background: #0a1113;
+  color: #e6f1ee;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.auth-field input:focus {
+  outline: 2px solid rgba(90, 200, 170, 0.5);
+  outline-offset: 1px;
+}
+
+.auth-error {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(200, 80, 80, 0.14);
+  color: #ffb4b4;
+  font-size: 13px;
+}
+
+.auth-error[hidden] {
+  display: none;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.auth-actions button {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid rgba(140, 190, 180, 0.3);
+  border-radius: 8px;
+  background: #16212333;
+  color: #e6f1ee;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.auth-actions button.primary {
+  border-color: rgba(90, 200, 170, 0.55);
+  background: rgba(60, 170, 145, 0.22);
+  font-weight: 600;
+}
+
+.auth-actions button:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.auth-foot {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #7d918d;
+}
+
+.auth-foot code {
+  color: #b6d8d0;
+}

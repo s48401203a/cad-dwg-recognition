@@ -264,6 +264,30 @@ def load_static_export_tool():
 # ---------------------------------------------------------------- 图纸路径解析
 
 
+def public_export_url(export_path: Path, *, fallback_prefix: str = "") -> str:
+    """把导出文件的磁盘位置转成公开 URL：`/exports/<相对导出根目录的路径>`。
+
+    注意两点（都是本轮实测踩到的坑）：
+    1. 不能用导出器返回的 `url` 直接拼 `relative_path` —— 它把已含项目 ID 的路径
+       又拼到同样含项目 ID 的 `public_url_prefix` 后面，会重复一层导致 404。
+    2. `/exports` 的服务根是 `EXPORTS_DIR`（不是 `STATIC_EXPORT_DIR`），
+       因为导出文件实际位于 `<EXPORTS_DIR>/static-pages/<项目>/<文件>`。
+       URL 必须保留 `static-pages/` 这一层，否则服务端找不到文件。
+    """
+    from pathlib import Path as _Path
+
+    candidates = [_exports_root, STATIC_EXPORT_DIR]
+    for root in candidates:
+        try:
+            relative = _Path(export_path).resolve().relative_to(_Path(root).resolve()).as_posix()
+        except (OSError, ValueError):
+            continue
+        return f"/exports/{relative}"
+    if fallback_prefix:
+        return fallback_prefix if fallback_prefix.startswith("/") else f"/{fallback_prefix}"
+    return f"/exports/{_Path(export_path).name}"
+
+
 def resolve_semantic_path(meta: dict[str, Any], drawing: dict[str, Any]) -> Path | None:
     """解析图纸的 semantic.json 路径。
 
@@ -942,9 +966,19 @@ async def export_project_static(project_id: str, payload: StaticExportCreate | N
         raise HTTPException(status_code=500, detail=f"静态导出失败: {exc}") from exc
 
 
-@router.get("/projects/{project_id}/share-link")
-async def project_share_link(project_id: str, request: Request, drawing_id: str | None = None) -> dict[str, Any]:
-    meta = load_project_or_404(project_id)
+def _build_share_result(
+    *,
+    meta: dict[str, Any],
+    request: Request,
+    drawing_id: str | None,
+    include_scope_token: bool,
+) -> dict[str, Any]:
+    """生成静态分享页并按需签发作用域分享令牌。
+
+    安全约定：
+    - 分享页默认**需要认证**；只为该导出文件签发独立的作用域令牌，绝不外泄主访问令牌。
+    - 令牌不出现在返回值之外的任何地方（不写日志、不写项目元数据、不写导出内容）。
+    """
     ensure_project_active(meta)
     require_capability("share_link")
     if drawing_id:
@@ -957,25 +991,55 @@ async def project_share_link(project_id: str, request: Request, drawing_id: str 
             meta,
             output_root=STATIC_EXPORT_DIR,
             drawing_id=str(selected_drawing_id) if selected_drawing_id else None,
-            file_name=f"{meta.get('name') or project_id}-share.html",
+            file_name=f"{meta.get('name') or meta['id']}-share.html",
             public_url_prefix="/exports/static-pages",
         )
         export_path = Path(result.get("path", ""))
         if not export_path.exists() or export_path.stat().st_size <= 0:
             raise ValueError(f"静态分享页面生成失败: {export_path}")
+
+        # 以磁盘真实位置为准构造公开 URL：`/exports/<相对 output_root 的路径>`。
+        # 注意不能直接用导出器返回的 `url`（它把已含项目 ID 的 relative_path 又拼到
+        # 同样含项目 ID 的 public_url_prefix 后面，会重复一层，导致分享链接 404）。
+        share_url_path = public_export_url(export_path, fallback_prefix=str(result.get("url") or ""))
+
         params = {"project": meta["id"]}
         if selected_drawing_id:
             params["drawing"] = str(selected_drawing_id)
-        return {
-            "url": f"{origin}{result['url']}",
+
+        payload: dict[str, Any] = {
+            "url": f"{origin}{share_url_path}",
+            "path": share_url_path,
             "app_url": f"{origin}/?{urlencode(params)}",
             "origin": origin,
             "project_id": meta["id"],
             "drawing_id": str(selected_drawing_id) if selected_drawing_id else None,
             "size_bytes": export_path.stat().st_size,
             "file_name": result.get("file_name"),
-            "path": result.get("path"),
+            "requires_auth": True,
+            "share_scope": None,
+            "share_expires_at": None,
         }
+
+        if include_scope_token:
+            from share_tokens import issue_share_token, share_url
+
+            try:
+                # 作用域用重建后的分享路径推导，保证与实际访问路径逐字符一致。
+                relative = share_url_path[len("/exports") :].lstrip("/")
+                record = issue_share_token(
+                    project_id=meta["id"],
+                    export_path=relative,
+                    drawing_id=selected_drawing_id,
+                )
+            except Exception as exc:
+                # 签发失败不阻断分享页生成：回退为"仅认证可访问"，并如实说明。
+                payload["share_error"] = f"未能签发分享令牌（分享页需要认证后访问）: {exc}"
+            else:
+                payload["url"] = share_url(origin, record["path_prefix"], record["token"])
+                payload["share_scope"] = record["path_prefix"]
+                payload["share_expires_at"] = record["expires_at"]
+        return payload
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -984,6 +1048,48 @@ async def project_share_link(project_id: str, request: Request, drawing_id: str 
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"分享链接生成失败: {exc}") from exc
+
+
+@router.post("/projects/{project_id}/share-link")
+async def project_share_link_post(project_id: str, request: Request, payload: StaticExportCreate | None = None) -> dict[str, Any]:
+    """生成分享页并返回链接。
+
+    改为 **POST**：该路由会**生成文件**（有副作用），不应作为可被预取/缓存的 GET。
+    返回的链接使用作用域限于该导出文件的分享令牌，不含主访问令牌。
+    """
+    meta = load_project_or_404(project_id)
+    drawing_id = payload.drawing_id if payload else None
+    return _build_share_result(meta=meta, request=request, drawing_id=drawing_id, include_scope_token=True)
+
+
+@router.get("/projects/{project_id}/share-link", deprecated=True)
+async def project_share_link_get(project_id: str, request: Request, drawing_id: str | None = None) -> dict[str, Any]:
+    """已弃用的 GET 形式：保留兼容调用方，但**只返回需要认证的分享页链接**，
+    不签发作用域令牌。请改用 POST。
+    """
+    meta = load_project_or_404(project_id)
+    result = _build_share_result(meta=meta, request=request, drawing_id=drawing_id, include_scope_token=False)
+    result["deprecated"] = "请改用 POST /api/projects/{project_id}/share-link；GET 不再签发分享令牌"
+    return result
+
+
+@router.get("/projects/{project_id}/share-tokens")
+async def project_share_tokens(project_id: str) -> dict[str, Any]:
+    """列出该项目的有效分享令牌（**不含令牌本身**），便于审计与撤销。"""
+    meta = load_project_or_404(project_id)
+    from share_tokens import list_share_tokens
+
+    return {"project_id": meta["id"], "tokens": list_share_tokens(meta["id"])}
+
+
+@router.delete("/projects/{project_id}/share-tokens")
+async def revoke_project_share_tokens(project_id: str) -> dict[str, Any]:
+    """撤销该项目的全部分享令牌。"""
+    meta = load_project_or_404(project_id)
+    from share_tokens import revoke_share_tokens
+
+    removed = revoke_share_tokens(meta["id"])
+    return {"project_id": meta["id"], "revoked": removed}
 
 
 @router.post("/projects/{project_id}/open-folder")

@@ -1,18 +1,18 @@
-"""访问控制：本地优先的 Host/Origin/CSRF 校验与可选令牌鉴权。
+"""访问控制：默认拒绝 + 显式匿名白名单。
 
-威胁模型（本工具是**本机单用户工具**，不是公网服务）：
-- 任意网页在用户浏览器里对本机端口发起跨源请求（CSRF / DNS rebinding），
-  进而读写项目、导出文件、调用打开文件等本地能力。
+威胁模型（本工具是**本机/局域网单用户工具**，不是公网服务）：
+- 在配置了访问令牌（或启用局域网模式）后，未经认证的访问者不得**枚举、读取或导出**项目与图纸内容；
+  包括项目列表/详情/语义数据/模型覆盖/项目包、导出接口、静态导出文件、日志与 WebSocket。
+- 任意网页在用户浏览器里对本机端口发起跨源请求（CSRF / DNS rebinding）。
 - 局域网内其他设备直接访问未鉴权的管理接口。
 
-对策：
-1. 默认只监听回环地址；绑定非回环地址必须显式开启局域网模式 **并** 设置访问令牌。
-2. 浏览器来源的请求执行同源判定：`Origin`/`Referer` 必须与请求 `Host` 一致，
-   或落在显式配置的开发来源（`CAD_DEV_ORIGINS`，如 Vite `http://127.0.0.1:5173`）。
-3. 无 `Origin` 的非浏览器客户端（curl/脚本）允许，但受 Host 校验与可选令牌约束。
-4. `Host` 头必须是回环地址、本机绑定地址或显式配置的主机名，防 DNS rebinding。
-5. 令牌一旦配置，所有写操作与管理接口都需要它；只读预览接口保持开放，
-   以便 `GET /api/health` 之类的探活与浏览器首屏不被阻断。
+设计要点：
+1. **默认拒绝**：`/api/**` 一律需要令牌，只有显式列入 `PUBLIC_API_PATHS` 的少数只读入口匿名放行。
+2. 前端外壳（`/`、`index.html`、`*.js`、`*.css`、`/vendor/**`、`/share-config.js`）必须匿名可取，
+   否则未认证用户连登录界面都拿不到；这些文件本身来自公开仓库，不含任何项目内容。
+3. `/exports/**` 始终需要认证（主令牌或**作用域分享令牌**，见 `share_tokens.py`）。
+4. **Host / Origin / CORS 不是身份认证**：无 `Origin` 的脚本客户端同样受令牌约束。
+5. 未配置令牌时（默认回环本机使用）行为不变，保持零摩擦。
 """
 
 from __future__ import annotations
@@ -20,21 +20,48 @@ from __future__ import annotations
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
-# 写操作 / 管理接口：一旦配置令牌，这些路径需要鉴权。
-PROTECTED_PREFIXES = (
-    "/api/upload",
-    "/api/parse",
-    "/api/project-packages/import",
-    "/api/replay/start",
+#: 允许匿名访问的 API 路径（精确匹配）。只放行不泄露项目内容的只读入口与认证入口。
+PUBLIC_API_PATHS = frozenset(
+    {
+        "/api/health",
+        "/api/auth/session",
+        "/api/auth/login",
+        "/api/auth/logout",
+    }
 )
-PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+#: 允许匿名访问的公开前端资源（正则匹配整条路径）。
+PUBLIC_ASSET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^/$"),
+    re.compile(r"^/[A-Za-z0-9._-]+\.html$"),
+    re.compile(r"^/share-config\.js$"),
+    re.compile(r"^/(?:js|css)/[A-Za-z0-9._/-]+\.(?:js|css)$"),
+    re.compile(r"^/vendor/[A-Za-z0-9._/-]+\.(?:js|mjs|css|woff2?|ttf|png|jpg|svg)$"),
+)
+
+#: 导出挂载点前缀：始终需要认证（主令牌或作用域分享令牌）。
+EXPORTS_PREFIX = "/exports"
+
+#: 需要路由到应用而非静态前端的路径前缀。
+API_PREFIX = "/api"
+
+#: 写方法（保留导出，供旧调用方引用）。
+PROTECTED_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+#: 兼容旧名字：现在这些前缀已包含在"默认拒绝"里。
+PROTECTED_PREFIXES = ("/api/", EXPORTS_PREFIX)
+
+#: 会话 cookie 名称。HttpOnly，不参与 JS 读取。
+SESSION_COOKIE = "cad_session"
 
 
 class AccessDenied(RuntimeError):
@@ -61,14 +88,31 @@ class AccessPolicy:
     def lan_enabled(self) -> bool:
         return not _is_loopback_host(self.host)
 
+    @property
+    def auth_enabled(self) -> bool:
+        """是否需要认证。为假时（默认回环、未配置令牌）保持零摩擦的本地体验。"""
+        return bool(self.token) and self.token_required
+
     def describe(self) -> dict[str, Any]:
         return {
             "bind_host": self.host,
             "lan_enabled": self.lan_enabled,
             "token_required": self.token_required,
+            "auth_enabled": self.auth_enabled,
             "dev_origins": sorted(self.dev_origins),
             "allowed_hosts": sorted(self.allowed_hosts),
         }
+
+
+@dataclass
+class AccessDecision:
+    """一次请求的访问判定结果。"""
+
+    allowed: bool
+    auth: str = "none"  # none | token | share_token | local
+    needs_auth: bool = False
+    reason: str | None = None
+    scope_path: str | None = None
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -116,7 +160,6 @@ def load_access_policy(env: dict[str, str] | None = None) -> AccessPolicy:
 
     dev_origins = _split_list(source.get("CAD_DEV_ORIGINS"))
     if not dev_origins:
-        # Vite 开发代理的默认来源；用户可以覆盖为空以外任何值。
         dev_origins = {
             "http://127.0.0.1:5173",
             "http://localhost:5173",
@@ -133,8 +176,6 @@ def load_access_policy(env: dict[str, str] | None = None) -> AccessPolicy:
             code="lan_requires_token",
         )
     if token_required_flag and not token:
-        # 「要求令牌但没有令牌」是自相矛盾的配置：此时写操作与 WebSocket 都无法通过校验，
-        # 与其启动一个所有管理接口都 401 的实例，不如直接拒绝启动。
         raise AccessDenied(
             "已设置 CAD_TOKEN_REQUIRED 但未提供 CAD_ACCESS_TOKEN：请设置令牌，或移除 CAD_TOKEN_REQUIRED",
             status_code=500,
@@ -169,7 +210,7 @@ def _env_fingerprint() -> tuple[str, ...]:
 
 
 def current_policy() -> AccessPolicy:
-    """读取当前策略；环境变量变化后自动重新加载（便于 CLI 先设令牌再导入应用）。"""
+    """读取当前策略；环境变量变化后自动重新加载。"""
     global _POLICY, _POLICY_FINGERPRINT
     fingerprint = _env_fingerprint()
     if _POLICY is None or _POLICY_FINGERPRINT != fingerprint:
@@ -185,14 +226,98 @@ def set_policy(policy: AccessPolicy | None) -> None:
     _POLICY_FINGERPRINT = None if policy is None else _env_fingerprint()
 
 
-# ---------------------------------------------------------------- 判定
+# ---------------------------------------------------------------- 匿名白名单
 
+
+def is_public_asset(path: str) -> bool:
+    """是否为可匿名获取的公开前端资源（登录界面本身必须能加载）。"""
+    candidate = path or "/"
+    if candidate.startswith(EXPORTS_PREFIX):
+        # 导出目录永远不匿名：它承载项目内容。
+        return False
+    return any(pattern.match(candidate) for pattern in PUBLIC_ASSET_PATTERNS)
+
+
+def is_public_api(path: str) -> bool:
+    """是否为可匿名访问的 API 入口（精确匹配，避免前缀绕过）。"""
+    return (path or "").rstrip("/") in PUBLIC_API_PATHS or (path or "") in PUBLIC_API_PATHS
+
+
+def requires_auth(method: str, path: str, policy: AccessPolicy | None = None) -> bool:
+    """该请求是否需要认证。未启用认证时一律返回 False（默认回环本机体验）。"""
+    policy = policy or current_policy()
+    if not policy.auth_enabled:
+        return False
+    candidate = path or "/"
+    if candidate.startswith(EXPORTS_PREFIX):
+        return True
+    if is_public_api(candidate):
+        return False
+    if candidate.startswith(API_PREFIX):
+        # 默认拒绝：/api 下除白名单外全部需要认证（含 GET 读接口）。
+        return True
+    if is_public_asset(candidate):
+        return False
+    # 非 /api、非导出、非公开前端资源：保守起见需要认证。
+    return True
+
+
+def requires_token(method: str, path: str, policy: AccessPolicy | None = None) -> bool:
+    """兼容旧签名：等价于 `requires_auth`。"""
+    return requires_auth(method, path, policy)
+
+
+# ---------------------------------------------------------------- 令牌提取
+
+
+def extract_token(headers: Any, cookies: Any = None, query_token: str | None = None) -> str | None:
+    """从 `Authorization: Bearer`、`X-CAD-Token`、会话 cookie 或 `?token=` 取令牌。
+
+    注意：返回的是调用方提供的凭据，**不得**写入日志或响应体。
+    """
+    if query_token:
+        return str(query_token).strip()
+    try:
+        auth = headers.get("authorization") or headers.get("Authorization")
+    except Exception:
+        auth = None
+    if auth:
+        parts = str(auth).split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return parts[1].strip()
+    try:
+        direct = headers.get("x-cad-token") or headers.get("X-CAD-Token")
+    except Exception:
+        direct = None
+    if direct:
+        return str(direct).strip()
+    if cookies:
+        for name in (SESSION_COOKIE, "cad_token"):
+            try:
+                value = cookies.get(name)
+            except Exception:
+                value = None
+            if value:
+                return str(value).strip()
+    return None
+
+
+def token_matches(candidate: str | None, policy: AccessPolicy | None = None) -> bool:
+    policy = policy or current_policy()
+    if not policy.token:
+        return False
+    if not candidate:
+        return False
+    return hmac.compare_digest(str(candidate), policy.token)
+
+
+# ---------------------------------------------------------------- Host / Origin
 
 def host_header_allowed(host_header: str | None, policy: AccessPolicy | None = None) -> bool:
     """Host 头是否可接受（防 DNS rebinding）。"""
     policy = policy or current_policy()
     if not host_header:
-        return True  # HTTP/1.0 或已由 ASGI 服务器补全
+        return True
     hostname = _hostname_of(host_header)
     if not hostname:
         return False
@@ -201,7 +326,6 @@ def host_header_allowed(host_header: str | None, policy: AccessPolicy | None = N
     if hostname in policy.allowed_hosts:
         return True
     if policy.lan_enabled:
-        # 局域网模式下允许绑定地址本身与常见私有网段字面量
         if hostname in {policy.host.strip("[]"), "0.0.0.0"}:
             return True
         try:
@@ -213,7 +337,10 @@ def host_header_allowed(host_header: str | None, policy: AccessPolicy | None = N
 
 
 def origin_allowed(origin: str | None, host_header: str | None, policy: AccessPolicy | None = None) -> bool:
-    """浏览器来源是否为同源或显式允许的开发来源。"""
+    """浏览器来源是否为同源或显式允许的开发来源。
+
+    这只防 CSRF，**不是**身份认证：无 Origin 的脚本客户端仍受令牌约束。
+    """
     policy = policy or current_policy()
     if not origin:
         return True
@@ -275,53 +402,7 @@ def _normalize_port(value: str | None) -> str | None:
     return text
 
 
-def token_matches(candidate: str | None, policy: AccessPolicy | None = None) -> bool:
-    policy = policy or current_policy()
-    if not policy.token:
-        return False
-    if not candidate:
-        return False
-    return hmac.compare_digest(str(candidate), policy.token)
-
-
-def extract_token(headers: Any, cookies: Any = None) -> str | None:
-    """从 `Authorization: Bearer`、`X-CAD-Token`、`?token=` 或 cookie 取令牌。"""
-    try:
-        auth = headers.get("authorization") or headers.get("Authorization")
-    except Exception:
-        auth = None
-    if auth:
-        parts = str(auth).split(None, 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            return parts[1].strip()
-    try:
-        direct = headers.get("x-cad-token") or headers.get("X-CAD-Token")
-    except Exception:
-        direct = None
-    if direct:
-        return str(direct).strip()
-    if cookies:
-        try:
-            value = cookies.get("cad_token")
-        except Exception:
-            value = None
-        if value:
-            return str(value).strip()
-    return None
-
-
-def requires_token(method: str, path: str, policy: AccessPolicy | None = None) -> bool:
-    """该请求是否需要令牌。"""
-    policy = policy or current_policy()
-    if not policy.token_required:
-        return False
-    if not policy.token:
-        # 局域网模式下未配置令牌已在 load_access_policy 阶段拒绝启动
-        return False
-    upper = (method or "GET").upper()
-    if upper in PROTECTED_METHODS:
-        return True
-    return any(path.startswith(prefix) for prefix in PROTECTED_PREFIXES)
+# ---------------------------------------------------------------- 统一检查
 
 
 def check_request(
@@ -332,8 +413,13 @@ def check_request(
     query_token: str | None = None,
     cookies: Any = None,
     policy: AccessPolicy | None = None,
-) -> None:
-    """HTTP 入口统一检查。不通过则抛 AccessDenied。"""
+    scoped_token_allowed: bool = False,
+) -> AccessDecision:
+    """HTTP 入口统一检查。不通过则抛 `AccessDenied`。
+
+    `scoped_token_allowed=True` 用于 `/exports/**`：允许作用域分享令牌，
+    但作用域校验由调用方（`authorize_export_request`）完成。
+    """
     policy = policy or current_policy()
     host_header = _get_header(headers, "host")
     origin = _get_header(headers, "origin")
@@ -342,7 +428,8 @@ def check_request(
     if not host_header_allowed(host_header, policy):
         raise AccessDenied(f"Host 头不被允许: {host_header}", code="host_not_allowed")
 
-    # 浏览器来源校验：跨源写请求一律拒绝；跨源读请求同样拒绝，避免被任何网页探测本地项目。
+    # CSRF：浏览器来源必须同源或显式允许。无 Origin 的脚本客户端不走这条分支，
+    # 但其身份仍由下面的令牌检查决定。
     if origin and not origin_allowed(origin, host_header, policy):
         raise AccessDenied(f"来源不被允许: {origin}", code="origin_not_allowed")
 
@@ -351,10 +438,18 @@ def check_request(
         if referer_origin and not origin_allowed(referer_origin, host_header, policy):
             raise AccessDenied(f"来源不被允许: {referer_origin}", code="origin_not_allowed")
 
-    if requires_token(method, path, policy):
-        candidate = query_token or extract_token(headers, cookies)
-        if not token_matches(candidate, policy):
-            raise AccessDenied("缺少或错误的访问令牌", status_code=401, code="token_required")
+    if not requires_auth(method, path, policy):
+        return AccessDecision(allowed=True, auth="none")
+
+    candidate = extract_token(headers, cookies, query_token)
+    if token_matches(candidate, policy):
+        return AccessDecision(allowed=True, auth="token")
+
+    if scoped_token_allowed:
+        # 交给调用方用作用域校验；这里只表示"凭据可能可以接受"。
+        return AccessDecision(allowed=True, auth="deferred", needs_auth=True, scope_path=path)
+
+    raise AccessDenied("需要访问令牌：请先登录或在请求中携带令牌", status_code=401, code="auth_required")
 
 
 def check_websocket(
@@ -365,7 +460,7 @@ def check_websocket(
     cookies: Any = None,
     policy: AccessPolicy | None = None,
 ) -> None:
-    """WebSocket 握手检查：同一套 Host/Origin 规则，并在配置令牌时要求令牌。"""
+    """WebSocket 握手检查：同一套 Host/Origin/令牌规则。"""
     policy = policy or current_policy()
     host_header = _get_header(headers, "host")
     origin = _get_header(headers, "origin")
@@ -373,10 +468,53 @@ def check_websocket(
         raise AccessDenied(f"WebSocket Host 头不被允许: {host_header}", code="host_not_allowed")
     if origin and not origin_allowed(origin, host_header, policy):
         raise AccessDenied(f"WebSocket 来源不被允许: {origin}", code="origin_not_allowed")
-    if policy.token and policy.token_required:
-        candidate = query_token or extract_token(headers, cookies)
+    if policy.auth_enabled:
+        candidate = extract_token(headers, cookies, query_token)
         if not token_matches(candidate, policy):
-            raise AccessDenied("WebSocket 缺少或错误的访问令牌", status_code=401, code="token_required")
+            raise AccessDenied("WebSocket 需要访问令牌", status_code=401, code="auth_required")
+
+
+def authorize_export_request(
+    *,
+    path: str,
+    headers: Any,
+    query_token: str | None = None,
+    cookies: Any = None,
+    policy: AccessPolicy | None = None,
+) -> AccessDecision:
+    """`/exports/**` 的授权：主令牌，或作用域限于该导出目录的分享令牌。"""
+    policy = policy or current_policy()
+    if not policy.auth_enabled:
+        return AccessDecision(allowed=True, auth="local")
+
+    candidate = extract_token(headers, cookies, query_token)
+    if token_matches(candidate, policy):
+        return AccessDecision(allowed=True, auth="token")
+
+    if candidate:
+        from share_tokens import resolve_share_token
+
+        record = resolve_share_token(candidate, path)
+        if record:
+            return AccessDecision(allowed=True, auth="share_token", scope_path=record.get("path_prefix"))
+
+    raise AccessDenied("导出文件需要访问令牌或有效的分享链接", status_code=401, code="auth_required")
+
+
+def public_health_payload(payload: dict[str, Any], *, authenticated: bool) -> dict[str, Any]:
+    """`/api/health` 的内容分级：匿名只给非敏感探活信息。"""
+    if authenticated:
+        return payload
+    return {
+        "ok": payload.get("ok", True),
+        "auth_required": bool(payload.get("auth_required")),
+        "authenticated": False,
+        "capabilities": {
+            name: {"available": bool(info.get("available"))}
+            for name, info in (payload.get("capabilities") or {}).items()
+            if isinstance(info, dict)
+        },
+    }
 
 
 def _origin_of(url: str) -> str | None:
@@ -397,17 +535,29 @@ def _get_header(headers: Any, name: str) -> str | None:
 
 
 __all__ = [
+    "AccessDecision",
     "AccessDenied",
     "AccessPolicy",
+    "API_PREFIX",
+    "EXPORTS_PREFIX",
+    "PROTECTED_METHODS",
     "PROTECTED_PREFIXES",
+    "PUBLIC_API_PATHS",
+    "PUBLIC_ASSET_PATTERNS",
+    "SESSION_COOKIE",
+    "authorize_export_request",
     "check_request",
     "check_websocket",
     "current_policy",
     "extract_token",
     "generate_token",
     "host_header_allowed",
+    "is_public_api",
+    "is_public_asset",
     "load_access_policy",
     "origin_allowed",
+    "public_health_payload",
+    "requires_auth",
     "requires_token",
     "set_policy",
     "token_matches",

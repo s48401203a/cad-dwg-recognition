@@ -187,20 +187,49 @@ def test_lan_mode_requires_token():
     assert policy.lan_enabled and policy.token_required
 
 
-def test_token_required_for_writes(token_client, clean_runtime, tmp_path: Path):
-    # 带令牌：成功
+def test_token_required_for_all_api_access(token_client, clean_runtime, tmp_path: Path):
+    """配置令牌后：写操作与**读操作**都需要令牌。
+
+    历史缺陷：`requires_token` 只保护写方法与少数路径前缀，导致匿名可以
+    `GET /api/projects`、`GET /api/projects/{id}`、导出接口，甚至带错误令牌也能读到项目内容。
+    现在 `/api/**` 默认拒绝，只有显式白名单（health / auth）匿名放行。
+    """
+    # 带令牌：写与读都成功
     ok = token_client.post("/api/projects", json={"name": "ok"})
     assert ok.status_code == 200, ok.text
+    project_id = ok.json()["id"]
+    assert token_client.get("/api/projects").status_code == 200
+    assert token_client.get(f"/api/projects/{project_id}").status_code == 200
 
-    # 不带令牌：401
+    # 不带令牌：读写都是 401
     token_client.headers.pop("X-CAD-Token", None)
-    denied = token_client.post("/api/projects", json={"name": "denied"})
-    assert denied.status_code == 401
-    assert denied.json()["code"] == "token_required"
+    for method, path in (
+        ("GET", "/api/projects"),
+        ("GET", f"/api/projects/{project_id}"),
+        ("GET", f"/api/projects/{project_id}/export"),
+        ("GET", "/api/project-packages"),
+        ("GET", "/api/replay/log"),
+        ("GET", "/api/replay/status"),
+        ("POST", "/api/projects"),
+        ("POST", f"/api/projects/{project_id}/export-static"),
+        ("PUT", f"/api/projects/{project_id}/model-overrides"),
+    ):
+        response = token_client.request(method, path, json={} if method in {"POST", "PUT"} else None)
+        assert response.status_code == 401, f"{method} {path} 应返回 401，实际 {response.status_code}"
 
-    # 只读预览仍然开放
-    readable = token_client.get("/api/projects")
-    assert readable.status_code == 200
+    # 错误令牌同样是 401（不能靠"猜"绕过）
+    token_client.headers.update({"X-CAD-Token": "definitely-wrong-token"})
+    assert token_client.get("/api/projects").status_code == 401
+    assert token_client.get(f"/api/projects/{project_id}").status_code == 401
+
+    # 白名单仍然匿名可用，且不泄露项目内容与本机路径
+    token_client.headers.pop("X-CAD-Token", None)
+    health = token_client.get("/api/health")
+    assert health.status_code == 200
+    payload = health.json()
+    assert payload["auth_required"] is True and payload["authenticated"] is False
+    assert "projects_dir" not in payload and "oda_path" not in payload
+    assert token_client.get("/api/auth/session").status_code == 200
 
 
 def test_websocket_rejects_cross_origin(client, clean_runtime):

@@ -22,11 +22,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from api import parse, projects, replay, upload, visual_audit
+from api import auth, exports, parse, projects, replay, upload, visual_audit
 from log_hub import broadcaster
 from log_retention import enforce_log_budget, log_retention_loop
 from parser.dwg_converter import DwgConverter, find_oda_file_converter
-from security import AccessDenied, check_request, check_websocket, current_policy, generate_token
+from security import (
+    EXPORTS_PREFIX,
+    AccessDenied,
+    authorize_export_request,
+    check_request,
+    check_websocket,
+    current_policy,
+    extract_token,
+    generate_token,
+    public_health_payload,
+    token_matches,
+)
 from storage import LOG_DIR, PROJECTS_DIR, UPLOAD_DIR
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -76,23 +87,55 @@ def _configure_cors(app_instance: FastAPI) -> None:
 _configure_cors(app)
 
 
+def _auth_error(exc: AccessDenied) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": str(exc), "code": exc.code},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @app.middleware("http")
 async def enforce_access_policy(request: Request, call_next):
-    """统一访问控制：Host / Origin / 令牌。"""
+    """统一访问控制：Host / Origin / 令牌。
+
+    规则见 `security.py`：`/api/**` 默认需要认证（显式白名单除外），
+    `/exports/**` 需要主令牌或作用域分享令牌，前端外壳资源匿名可取。
+
+    注意：Host / Origin / CORS 只防跨源滥用，**不是**身份认证；
+    不带 Origin 的脚本客户端同样要过令牌检查。
+    """
+    path = request.url.path
+    is_export = path == EXPORTS_PREFIX or path.startswith(f"{EXPORTS_PREFIX}/")
     try:
-        check_request(
+        decision = check_request(
             method=request.method,
-            path=request.url.path,
+            path=path,
             headers=request.headers,
             query_token=request.query_params.get("token"),
             cookies=request.cookies,
+            scoped_token_allowed=is_export,
         )
     except AccessDenied as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": str(exc), "code": exc.code},
-        )
-    return await call_next(request)
+        return _auth_error(exc)
+
+    if is_export:
+        # 导出文件始终需要认证：主令牌，或作用域限于该导出目录的分享令牌。
+        try:
+            decision = authorize_export_request(
+                path=path,
+                headers=request.headers,
+                query_token=request.query_params.get("share") or request.query_params.get("token"),
+                cookies=request.cookies,
+            )
+        except AccessDenied as exc:
+            return _auth_error(exc)
+
+    response = await call_next(request)
+    if decision.needs_auth or is_export:
+        # 不缓存受保护内容，避免代理/浏览器留存
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.middleware("http")
@@ -126,13 +169,21 @@ async def websocket_logs(ws: WebSocket) -> None:
 
 
 @app.get("/api/health")
-async def health() -> dict:
+async def health(request: Request) -> dict:
+    """健康检查。匿名只返回非敏感探活信息（是否可用），不回显本机路径。
+
+    需要认证时，`auth_required=true` 会提示前端进入登录流程。
+    """
     oda_path = find_oda_file_converter()
     from capabilities import capability_report
 
     policy = current_policy()
-    return {
+    candidate = extract_token(request.headers, request.cookies, request.query_params.get("token"))
+    authenticated = (not policy.auth_enabled) or token_matches(candidate, policy)
+    payload = {
         "ok": True,
+        "auth_required": policy.auth_enabled,
+        "authenticated": authenticated,
         "oda_available": DwgConverter.available(),
         "oda_path": str(oda_path) if oda_path else None,
         "runtime_root": os.environ.get("CAD_RUNTIME_ROOT") or None,
@@ -140,15 +191,19 @@ async def health() -> dict:
         "access": policy.describe(),
         "capabilities": capability_report()["capabilities"],
     }
+    return public_health_payload(payload, authenticated=authenticated)
 
 
+app.include_router(auth.router, prefix="/api")
 app.include_router(upload.router, prefix="/api")
 app.include_router(parse.router, prefix="/api")
 app.include_router(projects.router, prefix="/api")
 app.include_router(replay.router, prefix="/api")
 app.include_router(visual_audit.router, prefix="/api")
 
-app.mount("/exports", StaticFiles(directory=str(EXPORTS_DIR)), name="exports")
+# `/exports` 由受保护的路由提供（见 api/exports.py）：
+# 统一鉴权 + 路径策略 + 正确处理非 ASCII 文件名，不再使用无鉴权的 StaticFiles 挂载。
+app.include_router(exports.router)
 
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

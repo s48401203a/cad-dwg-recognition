@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CAD DWG 识别 3D 预览工具</title>
   <link rel="icon" href="data:," />
-  <link rel="stylesheet" href="./css/style.css?v=72" />
+  <link rel="stylesheet" href="./css/style.css?v=73" />
   <script src="./share-config.js?v=1"></script>
   <script type="importmap">
     {
@@ -23,6 +23,26 @@
       if (id === "proj_2fe23d7bec") document.body.classList.add("placement-studio");
     })();
   </script>
+  <div class="auth-overlay" id="authOverlay" hidden>
+    <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+      <h2 id="authTitle">需要访问令牌</h2>
+      <p class="auth-hint" id="authHint">
+        当前服务已启用访问控制（局域网模式或显式令牌）。请输入访问令牌后继续。
+        令牌只保存在本机浏览器，不会写入日志，也不会出现在分享链接中。
+      </p>
+      <label class="auth-field">
+        <span>访问令牌</span>
+        <input id="authTokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴启动脚本输出的令牌" />
+      </label>
+      <p class="auth-error" id="authError" hidden></p>
+      <div class="auth-actions">
+        <button id="authSubmitButton" class="primary" type="button">登录</button>
+        <button id="authLogoutButton" type="button" hidden>退出登录</button>
+      </div>
+      <p class="auth-foot" id="authFoot"></p>
+    </div>
+  </div>
+
   <div class="app-shell">
     <header class="topbar">
       <div class="brand">
@@ -32,6 +52,7 @@
       <div class="top-actions">
         <input id="fileInput" type="file" accept=".dwg,.dxf" multiple hidden />
         <div class="action-menu" data-action-menu>
+          <button id="logoutButton" class="menu-trigger" type="button" hidden title="清除本机会话与已保存的访问令牌">退出登录</button>
           <button class="menu-trigger" type="button" aria-expanded="false">项目 ▾</button>
           <div class="menu-panel" role="menu">
             <button id="projectButton" type="button" role="menuitem">新建 / 选择项目</button>
@@ -354,6 +375,6 @@
     </div>
   </div>
 
-  <script type="module" src="./js/app.js?v=108"></script>
+  <script type="module" src="./js/app.js?v=111"></script>
 </body>
 </html>

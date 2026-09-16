@@ -13,7 +13,11 @@
 - [ ] 提交列表中不出现 `backend/uploads/`、`backend/projects/`、`backend/projects-archive/`、
       `backend/logs/`、`backups/`、`archives/`、`exports/`、`projects/`。
 - [ ] 提交列表中不出现真实项目名称、客户名称、人名、地址、联系方式、真实设备编号截图。
-- [ ] 只允许提交 `docs/assets/demo-sanitized.png` 这一张脱敏演示图（生成式演示，不含真实图纸）。
+- [ ] 图片只允许提交**由本仓库代码生成**的两张演示图：`docs/assets/demo-scene.png`、
+      `docs/assets/demo-export.png`，生成脚本为 `tools_docs/make_demo_screenshots.py`
+      （输入是代码生成的合成夹具，可复现）。其它任何截图、图纸或图片一律留在本地。
+- [ ] 不要提交来源无法证明的素材。历史提交中的 `docs/assets/demo-sanitized.png` 已因此移除；
+      若日后要重新加入任何图片，先确认其生成方式或授权来源。
 - [ ] 提交列表中不出现本机绝对路径（类 Unix 的 `/home`、`/Users` 家目录，Windows 的盘符家目录）、
       私有网段地址（RFC1918 三段）、主机名、代理或账号配置。
 - [ ] 提交列表中不出现凭据：访问令牌、分享令牌、Cookie、`.env`、私钥、CI 密钥。
@@ -34,6 +38,12 @@ git grep -niE 'private key|access[_-]?token|client[_-]?secret|passwd|password' |
 
 # 4) 拟提交内容里是否有被忽略目录混入
 git status --porcelain | grep -vE '^\?\? '   # 跟踪区改动逐项确认
+
+# 5) 跟踪的图片必须只有本仓库生成的两张演示图
+git ls-files | grep -iE '\.(png|jpg|jpeg|gif|webp|bmp|svg)$'
+
+# 6) 第三方许可声明是否随分发保留（Three.js 的 MIT 声明义务）
+test -f frontend/vendor/three/LICENSE && echo 'Three.js LICENSE 已随附'
 ```
 
 命中结果要区分三类，不要一律判为泄露：**真实敏感内容**、**公开信息**

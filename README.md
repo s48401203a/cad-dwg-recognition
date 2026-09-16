@@ -4,7 +4,11 @@
 
 本仓库服务的是**通用强弱电图纸**，不是只服务某一客户。弱电与强电走同一条读取链路。默认场地包是 `generic`。百世快运 `express`、供应链 `supply_chain` 是可选场地包，需要月台、车尾、炮楼等场地推断时再显式启用。
 
-![脱敏演示图](docs/assets/demo-sanitized.png)
+![3D 场景演示（由本仓库代码 + 合成夹具生成）](docs/assets/demo-scene.png)
+
+![静态导出页演示（同一合成夹具）](docs/assets/demo-export.png)
+
+> 上面两张图由 `tools_docs/make_demo_screenshots.py` 用**本仓库代码 + 代码生成的合成夹具**（`tests/fixtures/generic_electrical_min.dxf`）在临时运行目录中现场生成，可复现。
 
 评测说明见 [`docs/generic-cad-eval.html`](docs/generic-cad-eval.html)（可用 `file://` 打开）。
 
@@ -370,18 +374,24 @@ python tests/regression_counts.py     # 需要本机已有解析结果
 - 这是**维护者决策项**，不是技术缺口：需要所有者选定许可证（例如 MIT / Apache-2.0 / 其他），
   并确认可以对仓库内全部内容授权。
 - 由 agent 代选的许可证不具有授权效力，因此本项目不会代为添加 `LICENSE`。
-- **决策材料**：内容来源分类（项目自有 / 第三方 / 来源待确认）、许可证方案对比、
+- **决策材料**：内容来源分类（有正向证据 / 第三方 / **缺少正向证据待确认**）、许可证方案对比、
   公开范围与历史遗留问题的选项，以及各项对「合并」与「正式开源发布」的阻塞关系，
   已整理在 [`RELEASE_READINESS.md`](RELEASE_READINESS.md)。
 
-随仓库分发的第三方内容：
+随仓库分发的第三方内容与声明义务，见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)：
 
 | 内容 | 许可 | 说明 |
 |---|---|---|
-| `frontend/vendor/three/` | MIT（Three.js） | 原样保留，未修改 |
-| `docs/assets/demo-sanitized.png` | 项目自有（脱敏演示图） | 不含客户信息 |
+| `frontend/vendor/three/`（Three.js r164，含 2 个 addons） | **MIT**（`Copyright © 2010-2024 three.js authors`） | 原样保留，未修改；已随附 `frontend/vendor/three/LICENSE`（上游全文）以满足 MIT 的声明保留要求 |
+| 依赖声明（FastAPI、ezdxf、PyYAML 等） | 各自许可 | 不内嵌源码，随使用者安装引入 |
+| `docs/assets/demo-scene.png`、`docs/assets/demo-export.png` | 由本仓库代码生成 | 生成脚本：`tools_docs/make_demo_screenshots.py` |
+
+**注意**：SPDX 标识（如 `SPDX-License-Identifier: MIT`）是机器可读的许可标识，
+**本身不构成许可义务的履行**；MIT 明文要求随分发保留版权声明与许可声明文本。
 
 客户图纸、客户规则与内部工具**不属于**可授权范围，也不会加入本仓库。
+仓库内**来源缺少正向证据**的内容（部分规则常量与编号前缀约定）已单列在
+[`RELEASE_READINESS.md`](RELEASE_READINESS.md) 中待维护者确认，**不被视为已授权可公开**。
 
 ---
 

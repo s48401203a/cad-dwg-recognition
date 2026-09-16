@@ -602,3 +602,39 @@ def test_empty_fixture_still_reports_units_and_layers(tmp_path: Path):
 def test_missing_file_raises_file_not_found(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         DxfReader.read(tmp_path / "nope.dxf")
+
+
+def test_arc_bounds_matches_dense_sampling():
+    """回归：`arc_bounds` 必须与圆弧密集采样得到的包围盒一致。
+
+    历史争议：曾怀疑「0°→270° 的包围盒 max_y 被抬高了半径」。复核发现**不是缺陷**：
+    该弧从 0° 逆时针扫到 270°，必然经过圆的最高点（90° 象限点），
+    且 270° 处的终点就是 (0, -r)，所以 (-r, -r, r, r) 才是正确答案。
+    本用例用参数化采样交叉验证，避免同类误判再次发生。
+    """
+    cases = [(0, 270), (90, 270), (45, 315), (0, 90), (0, 180), (180, 360), (270, 90), (30, 120)]
+    radius = 10.0
+    for start, end in cases:
+        implemented = arc_bounds({"x": 0.0, "y": 0.0}, radius, float(start), float(end))
+        sampled = _sampled_arc_bounds(float(start), float(end), radius)
+        assert implemented == pytest.approx(sampled, abs=1e-6), f"{start}°->{end}°"
+
+    # 端点恰为象限角时不得把该象限点重复计入（0°→90° 的极值就是两个端点）
+    quarter = arc_bounds({"x": 0.0, "y": 0.0}, radius, 0.0, 90.0)
+    assert quarter == pytest.approx((0.0, 0.0, radius, radius), abs=1e-9)
+    # 0°→270° 经过最高点，max_y 必须是 +r 而不是 0
+    three_quarter = arc_bounds({"x": 0.0, "y": 0.0}, radius, 0.0, 270.0)
+    assert three_quarter == pytest.approx((-radius, -radius, radius, radius), abs=1e-9)
+
+
+def _sampled_arc_bounds(start: float, end: float, radius: float, steps: int = 20000) -> tuple[float, float, float, float]:
+    sweep = arc_sweep_deg(start, end)
+    if sweep >= 360.0 - 1e-9:
+        return (-radius, -radius, radius, radius)
+    xs: list[float] = []
+    ys: list[float] = []
+    for index in range(steps + 1):
+        angle = math.radians(start) + math.radians(sweep) * (index / steps)
+        xs.append(radius * math.cos(angle))
+        ys.append(radius * math.sin(angle))
+    return (min(xs), min(ys), max(xs), max(ys))

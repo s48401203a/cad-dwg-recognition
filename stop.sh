@@ -10,6 +10,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
+# 按端口结束监听进程。注意不要用 `xargs -r`：BSD/macOS 的 xargs 没有 -r，
+# 空输入时反而会把 `kill` 当命令执行。
+kill_listeners() {
+    local port="$1"
+    command -v lsof >/dev/null 2>&1 || return 0
+    local pids
+    pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
+    [[ -n "$pids" ]] || return 0
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+}
+
 STOP_BACKEND=1
 FORCE=0
 for arg in "$@"; do
@@ -27,7 +39,7 @@ stop_vite() {
     fi
     VITE_PORT="${VITE_PORT:-5173}"
     if command -v lsof >/dev/null 2>&1; then
-        lsof -tiTCP:"$VITE_PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
+        kill_listeners "$VITE_PORT"
     fi
     rm -f "$ROOT/.vite-dev.url" "$ROOT/.vite-api.target"
     echo "[stop] vite 已停止"
@@ -49,7 +61,16 @@ STATE_FILE="$ROOT/.cad-runtime/server.json"
 STOPPED=0
 
 if [[ -f "$STATE_FILE" && -n "$PYTHON_BIN" ]]; then
-    mapfile -t STATE < <("$PYTHON_BIN" - "$STATE_FILE" <<'PY'
+    # macOS 自带 Bash 3.2 没有 mapfile/readarray，这里用可移植的 read 循环。
+    PID=""
+    PORT=""
+    while IFS= read -r state_line; do
+        if [[ -z "$PID" ]]; then
+            PID="$state_line"
+        elif [[ -z "$PORT" ]]; then
+            PORT="$state_line"
+        fi
+    done < <("$PYTHON_BIN" - "$STATE_FILE" <<'PY'
 import json, sys
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -60,8 +81,6 @@ print(data.get("port") or "")
 print(data.get("host") or "")
 PY
 )
-    PID="${STATE[0]:-}"
-    PORT="${STATE[1]:-}"
     if [[ -n "$PID" ]]; then
         if kill "$PID" 2>/dev/null; then
             echo "[stop] 已停止后端 pid=$PID"
@@ -69,7 +88,7 @@ PY
         fi
     fi
     if [[ "$STOPPED" -eq 0 && -n "$PORT" && "$FORCE" -eq 1 ]] && command -v lsof >/dev/null 2>&1; then
-        lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | xargs -r kill 2>/dev/null || true
+        kill_listeners "$PORT"
         echo "[stop] 已按端口停止后端 port=$PORT"
         STOPPED=1
     fi
@@ -80,7 +99,8 @@ if [[ "$STOPPED" -eq 0 ]]; then
         for port in $(seq 8000 8020); do
             pids="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)"
             if [[ -n "$pids" ]]; then
-                echo "$pids" | xargs -r kill 2>/dev/null || true
+                # shellcheck disable=SC2086
+                kill $pids 2>/dev/null || true
                 echo "[stop] 已按端口范围停止 pid(s)=$pids port=$port"
                 STOPPED=1
             fi

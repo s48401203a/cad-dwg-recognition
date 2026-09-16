@@ -112,6 +112,7 @@ def load_access_policy(env: dict[str, str] | None = None) -> AccessPolicy:
 
     token = (source.get("CAD_ACCESS_TOKEN") or "").strip() or None
     lan = not _is_loopback_host(host)
+    token_required_flag = _truthy(source.get("CAD_TOKEN_REQUIRED"))
 
     dev_origins = _split_list(source.get("CAD_DEV_ORIGINS"))
     if not dev_origins:
@@ -131,11 +132,19 @@ def load_access_policy(env: dict[str, str] | None = None) -> AccessPolicy:
             status_code=500,
             code="lan_requires_token",
         )
+    if token_required_flag and not token:
+        # 「要求令牌但没有令牌」是自相矛盾的配置：此时写操作与 WebSocket 都无法通过校验，
+        # 与其启动一个所有管理接口都 401 的实例，不如直接拒绝启动。
+        raise AccessDenied(
+            "已设置 CAD_TOKEN_REQUIRED 但未提供 CAD_ACCESS_TOKEN：请设置令牌，或移除 CAD_TOKEN_REQUIRED",
+            status_code=500,
+            code="token_required_without_token",
+        )
 
     return AccessPolicy(
         host=host,
         token=token,
-        token_required=bool(token) or lan or _truthy(source.get("CAD_TOKEN_REQUIRED")),
+        token_required=bool(token) or lan or token_required_flag,
         dev_origins=dev_origins,
         allowed_hosts=allowed_hosts,
         trust_proxy=_truthy(source.get("CAD_TRUST_PROXY")),

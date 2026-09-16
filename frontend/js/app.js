@@ -1,6 +1,7 @@
 import { api, captureAccessToken } from "./api.js?v=54";
 
-// 启动脚本可能通过 ?token=... 传入访问令牌（局域网模式必须）；先收敛再发请求。
+// 启动脚本可能通过 ?token=... 传入访问令牌（局域网模式必须）。
+// 必须在 Logger 连接 WebSocket 之前完成，否则 WS 会以无令牌状态握手而被拒绝。
 captureAccessToken();
 import { Logger } from "./logger.js";
 import { ProjectManager } from "./projectManager.js?v=6";

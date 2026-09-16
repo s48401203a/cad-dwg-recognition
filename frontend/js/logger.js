@@ -10,6 +10,8 @@ export class Logger {
 
   connect() {
     const protocol = location.protocol === "https:" ? "wss" : "ws";
+    // 令牌在 app 启动时从 ?token= 收敛到 localStorage；这里每次重连都重新读取，
+    // 保证局域网/启用令牌模式下 WebSocket 也能通过鉴权。
     const token = accessToken();
     const query = token ? `?token=${encodeURIComponent(token)}` : "";
     this.socket = new WebSocket(`${protocol}://${location.host}/ws/logs${query}`);
